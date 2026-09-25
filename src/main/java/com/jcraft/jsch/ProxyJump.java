@@ -32,7 +32,6 @@ import java.util.function.BooleanSupplier;
  * of every hop. Hops do not each get the full timeout.
  */
 public final class ProxyJump implements ReadTimeoutProxy {
-  private static final ThreadLocal<Set<String>> CONNECTING = ThreadLocal.withInitial(HashSet::new);
   private static final int DEFAULT_PORT = 22;
   private static final String URI_PREFIX = "ssh://";
   // A tunnelled SSH session needs a wider window than port forwarding; OpenSSH uses 2 MiB.
@@ -42,6 +41,9 @@ public final class ProxyJump implements ReadTimeoutProxy {
   private final Session target;
   private final List<Hop> hops;
   private final List<Session> sessions = new ArrayList<>();
+  // Aliases of the sessions whose ProxyJump chains lead to this one; a hop's own ProxyJump is the
+  // only way chains recurse, so passing them down explicitly detects loops without thread state.
+  private Set<String> ancestors = Collections.emptySet();
   private ChannelProxy destination;
 
   public ProxyJump(Session target, String specification) throws JSchException {
@@ -52,11 +54,6 @@ public final class ProxyJump implements ReadTimeoutProxy {
   @Override
   public void connect(SocketFactory socketFactory, String host, int port, int timeout)
       throws JSchException {
-    String key = target.org_host;
-    Set<String> connecting = CONNECTING.get();
-    if (!connecting.add(key)) {
-      throw new JSchException("ProxyJump cycle involving " + key);
-    }
     try {
       Session previous = null;
       for (Hop hop : hops) {
@@ -75,11 +72,6 @@ public final class ProxyJump implements ReadTimeoutProxy {
     } catch (JSchException | RuntimeException e) {
       close();
       throw e;
-    } finally {
-      connecting.remove(key);
-      if (connecting.isEmpty()) {
-        CONNECTING.remove();
-      }
     }
   }
 
@@ -96,11 +88,24 @@ public final class ProxyJump implements ReadTimeoutProxy {
       next.setPort(hop.port);
     }
     if (previous != null) {
+      // Like ssh -J, only the first hop keeps a ProxyJump of its own Host config.
       next.setProxy(new ChannelProxy(previous));
-    } else if (socketFactory != null) {
+    } else if (next.getProxy() instanceof ProxyJump) {
+      Set<String> chain = new HashSet<>(ancestors);
+      chain.add(target.org_host);
+      ((ProxyJump) next.getProxy()).setAncestors(chain);
+    }
+    if (previous == null && socketFactory != null) {
       next.setSocketFactory(socketFactory);
     }
     return next;
+  }
+
+  private void setAncestors(Set<String> chain) throws JSchException {
+    if (chain.contains(target.org_host)) {
+      throw new JSchException("ProxyJump cycle involving " + target.org_host);
+    }
+    ancestors = Collections.unmodifiableSet(chain);
   }
 
   /** The largest connect timeout on the path, or 0 if none is set. */

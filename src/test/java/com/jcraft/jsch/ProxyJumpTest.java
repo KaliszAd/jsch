@@ -102,6 +102,72 @@ class ProxyJumpTest {
   }
 
   @Test
+  void detectsIndirectJumpCycle() throws Exception {
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse(String.join("\n", "Host a", "  User u",
+        "  ProxyJump b", "Host b", "  User u", "  ProxyJump a", "")));
+    JSchException error = assertThrows(JSchException.class, () -> jsch.getSession("a").connect());
+    assertEquals("ProxyJump cycle involving a", error.getMessage());
+  }
+
+  @Test
+  void sameThreadMayConnectSameAliasWhileAnotherConnectIsInProgress() throws Exception {
+    // A callback (here the first hop's SocketFactory) may open an independent session to the
+    // same destination on the connecting thread; that is not a cycle.
+    int port;
+    try (ServerSocket closed = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+      port = closed.getLocalPort();
+    }
+    {
+      JSch jsch = new JSch();
+      jsch.setConfigRepository(
+          OpenSSHConfig.parse(String.join("\n", "Host target", "  User u", "  ProxyJump hop",
+              "Host hop", "  User u", "  HostName 127.0.0.1", "  Port " + port, "")));
+      List<String> nestedErrors = new ArrayList<>();
+      SocketFactory factory = new SocketFactory() {
+        private boolean nested;
+
+        @Override
+        public Socket createSocket(String host, int p) throws java.io.IOException {
+          if (!nested) {
+            nested = true;
+            Session inner = sessionWith(jsch, this);
+            try {
+              inner.connect(2000);
+            } catch (JSchException e) {
+              nestedErrors.add(e.getMessage());
+            }
+          }
+          throw new java.io.IOException("refused by test");
+        }
+
+        @Override
+        public java.io.InputStream getInputStream(Socket socket) {
+          return null;
+        }
+
+        @Override
+        public java.io.OutputStream getOutputStream(Socket socket) {
+          return null;
+        }
+      };
+      assertThrows(JSchException.class, () -> sessionWith(jsch, factory).connect(2000));
+      assertEquals(1, nestedErrors.size());
+      assertFalse(nestedErrors.get(0).contains("cycle"), nestedErrors.get(0));
+    }
+  }
+
+  private static Session sessionWith(JSch jsch, SocketFactory factory) {
+    try {
+      Session session = jsch.getSession("target");
+      session.setSocketFactory(factory);
+      return session;
+    } catch (JSchException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  @Test
   void hopKeepsOwnConfigUnlessTargetHasExplicitHostKeyPolicy() throws Exception {
     Path targetKnownHosts = Files.createFile(tempDir.resolve("target_known_hosts"));
     Path jumpKnownHosts = Files.createFile(tempDir.resolve("jump_known_hosts"));

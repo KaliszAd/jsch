@@ -2968,6 +2968,10 @@ public class Session {
     this.proxy = proxy;
   }
 
+  Proxy getProxy() {
+    return proxy;
+  }
+
   public void setHost(String host) {
     this.host = host;
   }
