@@ -22,11 +22,11 @@ import java.util.concurrent.TimeUnit;
  * Each hop is a separate {@link Session} that uses its own {@code Host} configuration. Explicit
  * host-key constraints set on the target session by the application (a host-key repository, a
  * stricter {@code StrictHostKeyChecking}, or {@code server_host_key}) are also applied to the hops,
- * but a hop's own {@code StrictHostKeyChecking} is never weakened. Hops share the target's
- * {@link UserInfo}, so like {@code ssh -J} they can ask for a password, a passphrase or a host-key
- * decision, each prompt naming the hop it is for; a {@code UserInfo} that answers every prompt with
- * the same password will send it to every hop. A password set with {@link Session#setPassword}
- * applies to the target only.
+ * but a hop's own {@code StrictHostKeyChecking} is never weakened. Hops never see the target's
+ * {@link UserInfo} or password. Prompts from hops, for a password, a passphrase or a host-key
+ * decision, go to the {@link Session#setProxyJumpUserInfo ProxyJump UserInfo} if one is set, each
+ * prompt naming the hop it is for, as {@code ssh -J} asks for every hop in turn. Without one, hops
+ * must authenticate without prompting, for example with keys from the identity repository.
  *
  * <p>
  * The whole chain shares one connect deadline: the largest {@code ConnectTimeout} of the target and
@@ -133,6 +133,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
     };
     private Session hop;
     private int users;
+    private Session connecting; // a hop one thread is opening while others wait for it
 
     SharedHop(HopFactory factory) {
       this.factory = factory;
@@ -147,27 +148,78 @@ public final class ProxyJump implements ReadTimeoutProxy {
       return hop != null && hop.isConnected();
     }
 
-    /** Disconnects the hop now; sessions tunnelled through it lose their connection. */
-    public synchronized void close() {
-      if (hop != null) {
-        hop.disconnect();
+    /**
+     * Disconnects the hop now; sessions tunnelled through it lose their connection, and a thread
+     * still opening it gets an error instead of the hop.
+     */
+    public void close() {
+      Session open;
+      Session opening;
+      synchronized (this) {
+        open = hop;
+        opening = connecting;
         hop = null;
+        connecting = null;
         users = 0;
+        notifyAll();
+      }
+      if (open != null) {
+        open.disconnect();
+      }
+      if (opening != null) {
+        opening.disconnect();
       }
     }
 
-    synchronized Session acquire(int timeout) throws JSchException {
-      if (hop == null || !hop.isConnected()) {
-        Session created = factory.create();
-        if (created == null) {
-          throw new JSchException("ProxyJump hop factory returned no session");
+    Session acquire(int timeout) throws JSchException {
+      Session created;
+      synchronized (this) {
+        while (true) {
+          if (hop != null && hop.isConnected()) {
+            users++;
+            return hop;
+          }
+          if (connecting == null) {
+            created = factory.create();
+            if (created == null) {
+              throw new JSchException("ProxyJump hop factory returned no session");
+            }
+            connecting = created;
+            break;
+          }
+          try {
+            wait(); // another thread is opening the hop
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JSchException("ProxyJump hop connect interrupted");
+          }
         }
-        created.connect(connectBudget(timeout, Collections.singletonList(created)));
-        hop = created;
-        users = 0;
       }
-      users++;
-      return hop;
+      // Not under the monitor: close() and release() must not wait for a slow hop or a prompt.
+      try {
+        created.connect(connectBudget(timeout, Collections.singletonList(created)));
+      } catch (JSchException | RuntimeException e) {
+        abandon(created);
+        throw e;
+      }
+      synchronized (this) {
+        if (connecting != created) {
+          created.disconnect(); // close() ran meanwhile
+          throw new JSchException("ProxyJump hop closed while connecting");
+        }
+        connecting = null;
+        hop = created;
+        users = 1;
+        notifyAll();
+        return hop;
+      }
+    }
+
+    private synchronized void abandon(Session created) {
+      if (connecting == created) {
+        connecting = null;
+      }
+      notifyAll(); // the next waiter tries for itself
     }
 
     synchronized void release(Session used) {
@@ -233,7 +285,8 @@ public final class ProxyJump implements ReadTimeoutProxy {
     Session next =
         target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? DEFAULT_PORT : hop.port);
     target.applyExplicitHostKeyPolicyTo(next);
-    next.setUserInfo(target.getUserInfo());
+    next.setUserInfo(target.getProxyJumpUserInfo());
+    next.setProxyJumpUserInfo(target.getProxyJumpUserInfo());
     next.setDaemonThread(target.daemon_thread);
     next.setThreadFactory(target.getThreadFactory());
     if (target.getLogger() != target.jsch.getInstanceLogger()) {
@@ -486,24 +539,21 @@ public final class ProxyJump implements ReadTimeoutProxy {
     public void connect(SocketFactory socketFactory, String host, int port, int timeout)
         throws JSchException {
       hop = source.acquire(timeout);
-      ChannelDirectTCPIP opened;
       try {
-        opened = (ChannelDirectTCPIP) hop.openChannel("direct-tcpip");
-      } catch (JSchException | RuntimeException e) {
-        close();
-        throw e;
-      }
-      channel = opened;
-      opened.setLocalWindowSizeMax(CHANNEL_WINDOW_SIZE);
-      opened.setLocalWindowSize(CHANNEL_WINDOW_SIZE);
-      opened.setLocalPacketSize(CHANNEL_PACKET_SIZE);
-      opened.setHost(host);
-      opened.setPort(port);
-      TunnelBuffer buffer = new TunnelBuffer(INITIAL_BUFFER_SIZE, CHANNEL_WINDOW_SIZE);
-      // The channel writes received data to the sink and closes it on EOF or disconnect.
-      opened.setOutputStream(buffer.sink());
-      in = buffer;
-      try {
+        ChannelDirectTCPIP opened = (ChannelDirectTCPIP) hop.openChannel("direct-tcpip");
+        if (opened == null) {
+          throw new JSchException("ProxyJump hop " + hop.getHost() + " is closing");
+        }
+        channel = opened;
+        opened.setLocalWindowSizeMax(CHANNEL_WINDOW_SIZE);
+        opened.setLocalWindowSize(CHANNEL_WINDOW_SIZE);
+        opened.setLocalPacketSize(CHANNEL_PACKET_SIZE);
+        opened.setHost(host);
+        opened.setPort(port);
+        TunnelBuffer buffer = new TunnelBuffer(INITIAL_BUFFER_SIZE, CHANNEL_WINDOW_SIZE);
+        // The channel writes received data to the sink and closes it on EOF or disconnect.
+        opened.setOutputStream(buffer.sink());
+        in = buffer;
         out = opened.getOutputStream();
         opened.connect(timeout);
         if (!opened.isConnected()) {
@@ -578,6 +628,9 @@ public final class ProxyJump implements ReadTimeoutProxy {
     private final OutputStream sink = new Sink();
 
     TunnelBuffer(int initialSize, int limit) {
+      if (initialSize <= 0) {
+        throw new IllegalArgumentException("buffer size must be positive");
+      }
       this.ring = new byte[initialSize];
       this.limit = Math.max(initialSize, limit);
     }
@@ -619,10 +672,11 @@ public final class ProxyJump implements ReadTimeoutProxy {
         }
         long left = 0;
         if (deadline != 0) {
-          left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
-          if (left <= 0) {
+          long leftNanos = deadline - System.nanoTime();
+          if (leftNanos <= 0) {
             throw new SocketTimeoutException("ProxyJump read timed out");
           }
+          left = Math.max(1, TimeUnit.NANOSECONDS.toMillis(leftNanos));
         }
         try {
           wait(left);

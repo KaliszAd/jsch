@@ -257,6 +257,48 @@ class ProxyJumpTest {
   }
 
   @Test
+  void sharedHopCloseDoesNotWaitForAHopStillConnecting() throws Exception {
+    JSch jsch = new JSch();
+    java.util.concurrent.CountDownLatch connecting = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
+    List<StubHop> created = new ArrayList<>();
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      StubHop hop = new StubHop(jsch) {
+        @Override
+        public void connect(int timeout) {
+          connecting.countDown();
+          try {
+            closed.await(); // a slow bastion or an unanswered prompt
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          super.connect(timeout);
+        }
+      };
+      created.add(hop);
+      return hop;
+    });
+    List<String> failures = new ArrayList<>();
+    Thread user = new Thread(() -> {
+      try {
+        shared.acquire(0);
+      } catch (JSchException e) {
+        failures.add(e.getMessage());
+      }
+    });
+    user.start();
+    assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+      connecting.await();
+      shared.close(); // must return although the connect has not finished
+      closed.countDown();
+      user.join();
+    });
+    assertEquals(Arrays.asList("ProxyJump hop closed while connecting"), failures);
+    assertFalse(created.get(0).connected, "the abandoned hop ends disconnected");
+    assertFalse(shared.isOpen());
+  }
+
+  @Test
   void sharedHopIsOpenedOnceUnderConcurrentUse() throws Exception {
     JSch jsch = new JSch();
     List<StubHop> created = java.util.Collections.synchronizedList(new ArrayList<>());
@@ -423,7 +465,7 @@ class ProxyJumpTest {
   }
 
   @Test
-  void hopInheritsUserInfoThreadSettingsAndLoggerButNotPassword() throws Exception {
+  void hopPromptsThroughProxyJumpUserInfoOnlyAndInheritsThreadSettings() throws Exception {
     JSch jsch = new JSch();
     Session target = jsch.getSession("user", "target");
     ThreadFactory factory = Thread::new;
@@ -459,14 +501,51 @@ class ProxyJumpTest {
         // nothing to show
       }
     };
-    target.setUserInfo(prompts);
+    UserInfo targetOnly = new UserInfo() {
+      @Override
+      public String getPassphrase() {
+        return null;
+      }
+
+      @Override
+      public String getPassword() {
+        return "target-secret";
+      }
+
+      @Override
+      public boolean promptPassword(String message) {
+        return true;
+      }
+
+      @Override
+      public boolean promptPassphrase(String message) {
+        return false;
+      }
+
+      @Override
+      public boolean promptYesNo(String message) {
+        return false;
+      }
+
+      @Override
+      public void showMessage(String message) {
+        // nothing to show
+      }
+    };
+    target.setUserInfo(targetOnly);
     target.setPassword("target-only".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    Session silentHop =
+        new ProxyJump(target, "jump").createHop(new ProxyJump.Hop("u", "jump", 0), null, null);
+    assertNull(silentHop.getUserInfo(), "the target's UserInfo is never offered to a hop");
+    assertNull(silentHop.password, "a password set for the target is not offered to hops");
+    target.setProxyJumpUserInfo(prompts);
     target.setDaemonThread(true);
     target.setThreadFactory(factory);
     target.setLogger(logger);
     Session hop =
         new ProxyJump(target, "jump").createHop(new ProxyJump.Hop("u", "jump", 0), null, null);
-    assertSame(prompts, hop.getUserInfo(), "hops prompt through the same UserInfo, like ssh -J");
+    assertSame(prompts, hop.getUserInfo(), "hops prompt through the ProxyJump UserInfo");
+    assertSame(prompts, hop.getProxyJumpUserInfo(), "and pass it on to hops of their own");
     assertNull(hop.password, "a password set for the target is not offered to hops");
     assertTrue(hop.daemon_thread);
     assertSame(factory, hop.getThreadFactory());
