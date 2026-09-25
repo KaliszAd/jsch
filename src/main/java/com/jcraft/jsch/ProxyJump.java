@@ -1,7 +1,6 @@
 package com.jcraft.jsch;
 
 import java.io.ByteArrayOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -11,11 +10,9 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
 
 /**
  * Carries an SSH connection through one or more direct-tcpip channels, like OpenSSH's
@@ -25,11 +22,20 @@ import java.util.function.BooleanSupplier;
  * Each hop is a separate {@link Session} that uses its own {@code Host} configuration. Explicit
  * host-key constraints set on the target session by the application (a host-key repository, a
  * stricter {@code StrictHostKeyChecking}, or {@code server_host_key}) are also applied to the hops,
- * but a hop's own {@code StrictHostKeyChecking} is never weakened.
+ * but a hop's own {@code StrictHostKeyChecking} is never weakened. Hops receive no {@link UserInfo}
+ * or password from the target, so they must authenticate without prompting, for example with keys
+ * from the identity repository, an agent, or their own {@code IdentityFile}.
  *
  * <p>
  * The whole chain shares one connect deadline: the largest {@code ConnectTimeout} of the target and
  * of every hop. Hops do not each get the full timeout.
+ *
+ * <p>
+ * {@link #through(Session)} tunnels a session through a hop the application has already connected,
+ * so several sessions can share one hop like OpenSSH's {@code ControlMaster}.
+ *
+ * <p>
+ * A proxy instance serves one session, which serializes {@link #connect} and {@link #close} on it.
  */
 public final class ProxyJump implements ReadTimeoutProxy {
   private static final int DEFAULT_PORT = 22;
@@ -37,23 +43,31 @@ public final class ProxyJump implements ReadTimeoutProxy {
   // A tunnelled SSH session needs a wider window than port forwarding; OpenSSH uses 2 MiB.
   private static final int CHANNEL_WINDOW_SIZE = 0x200000;
   private static final int CHANNEL_PACKET_SIZE = 0x8000;
+  private static final int INITIAL_BUFFER_SIZE = 0x8000;
 
   private final Session target;
   private final List<Hop> hops;
   private final List<Session> sessions = new ArrayList<>();
-  // Aliases of the sessions whose ProxyJump chains lead to this one; a hop's own ProxyJump is the
-  // only way chains recurse, so passing them down explicitly detects loops without thread state.
-  private Set<String> ancestors = Collections.emptySet();
-  private ChannelProxy destination;
+  private volatile ChannelProxy destination;
 
   public ProxyJump(Session target, String specification) throws JSchException {
     this.target = target;
     this.hops = parse(specification);
   }
 
+  /**
+   * Returns a proxy that carries a session through a direct-tcpip channel of {@code hop}, which the
+   * caller connects before and disconnects after use. Several sessions may share one hop, each with
+   * its own proxy instance.
+   */
+  public static Proxy through(Session hop) {
+    return new ChannelProxy(Objects.requireNonNull(hop, "hop"));
+  }
+
   @Override
   public void connect(SocketFactory socketFactory, String host, int port, int timeout)
       throws JSchException {
+    checkForCycle();
     try {
       Session previous = null;
       for (Hop hop : hops) {
@@ -65,14 +79,37 @@ public final class ProxyJump implements ReadTimeoutProxy {
       for (Session session : sessions) {
         session.connect(remaining(deadline));
       }
-      destination = new ChannelProxy(previous);
-      destination.connect(socketFactory, host, port, remaining(deadline));
+      ChannelProxy tunnel = new ChannelProxy(previous);
+      destination = tunnel;
+      tunnel.connect(socketFactory, host, port, remaining(deadline));
       // Bound each read of the target handshake; Session replaces this once it is authenticated.
-      destination.setReadTimeout(budget);
+      tunnel.setReadTimeout(budget);
     } catch (JSchException | RuntimeException e) {
       close();
       throw e;
     }
+  }
+
+  /**
+   * Chains only nest through the first hop's own {@code ProxyJump} setting, which its
+   * {@code Session} takes from the config repository. Following those settings from alias to alias,
+   * without creating a session, finds a loop before anything is opened.
+   */
+  private void checkForCycle() throws JSchException {
+    ConfigRepository repository = target.jsch.getConfigRepository();
+    List<String> path = new ArrayList<>();
+    String alias = hops.get(0).host;
+    while (!path.contains(alias)) {
+      path.add(alias);
+      ConfigRepository.Config config = repository == null ? null : repository.getConfig(alias);
+      String value = config == null ? null : config.getValue("ProxyJump");
+      if (value == null || value.equalsIgnoreCase("none")) {
+        return;
+      }
+      alias = parse(value).get(0).host;
+    }
+    path.add(alias);
+    throw new JSchException("ProxyJump cycle: " + String.join(" -> ", path));
   }
 
   Session createHop(Hop hop, Session previous, SocketFactory socketFactory) throws JSchException {
@@ -90,22 +127,10 @@ public final class ProxyJump implements ReadTimeoutProxy {
     if (previous != null) {
       // Like ssh -J, only the first hop keeps a ProxyJump of its own Host config.
       next.setProxy(new ChannelProxy(previous));
-    } else if (next.getProxy() instanceof ProxyJump) {
-      Set<String> chain = new HashSet<>(ancestors);
-      chain.add(target.org_host);
-      ((ProxyJump) next.getProxy()).setAncestors(chain);
-    }
-    if (previous == null && socketFactory != null) {
+    } else if (socketFactory != null) {
       next.setSocketFactory(socketFactory);
     }
     return next;
-  }
-
-  private void setAncestors(Set<String> chain) throws JSchException {
-    if (chain.contains(target.org_host)) {
-      throw new JSchException("ProxyJump cycle involving " + target.org_host);
-    }
-    ancestors = Collections.unmodifiableSet(chain);
   }
 
   /** The largest connect timeout on the path, or 0 if none is set. */
@@ -130,12 +155,14 @@ public final class ProxyJump implements ReadTimeoutProxy {
 
   @Override
   public InputStream getInputStream() {
-    return destination == null ? null : destination.getInputStream();
+    ChannelProxy tunnel = destination;
+    return tunnel == null ? null : tunnel.getInputStream();
   }
 
   @Override
   public OutputStream getOutputStream() {
-    return destination == null ? null : destination.getOutputStream();
+    ChannelProxy tunnel = destination;
+    return tunnel == null ? null : tunnel.getOutputStream();
   }
 
   @Override
@@ -148,15 +175,17 @@ public final class ProxyJump implements ReadTimeoutProxy {
     if (timeout < 0) {
       throw new JSchException("invalid timeout value");
     }
-    if (destination != null) {
-      destination.setReadTimeout(timeout);
+    ChannelProxy tunnel = destination;
+    if (tunnel != null) {
+      tunnel.setReadTimeout(timeout);
     }
   }
 
   @Override
   public void close() {
-    if (destination != null) {
-      destination.close();
+    ChannelProxy tunnel = destination;
+    if (tunnel != null) {
+      tunnel.close();
       destination = null;
     }
     for (int i = sessions.size() - 1; i >= 0; i--) {
@@ -321,29 +350,35 @@ public final class ProxyJump implements ReadTimeoutProxy {
     }
   }
 
+  /** Tunnels one session through a direct-tcpip channel of an already connected hop. */
   private static final class ChannelProxy implements ReadTimeoutProxy {
-    private final Session previous;
+    private final Session hop;
     private ChannelDirectTCPIP channel;
-    private TimeoutInputStream in;
+    private volatile TunnelBuffer in;
     private OutputStream out;
 
-    ChannelProxy(Session previous) {
-      this.previous = previous;
+    ChannelProxy(Session hop) {
+      this.hop = hop;
     }
 
     @Override
     public void connect(SocketFactory socketFactory, String host, int port, int timeout)
         throws JSchException {
-      ChannelDirectTCPIP opened = (ChannelDirectTCPIP) previous.openChannel("direct-tcpip");
+      if (!hop.isConnected()) {
+        throw new JSchException("ProxyJump hop " + hop.getHost() + " is not connected");
+      }
+      ChannelDirectTCPIP opened = (ChannelDirectTCPIP) hop.openChannel("direct-tcpip");
       channel = opened;
       opened.setLocalWindowSizeMax(CHANNEL_WINDOW_SIZE);
       opened.setLocalWindowSize(CHANNEL_WINDOW_SIZE);
       opened.setLocalPacketSize(CHANNEL_PACKET_SIZE);
       opened.setHost(host);
       opened.setPort(port);
+      TunnelBuffer buffer = new TunnelBuffer(INITIAL_BUFFER_SIZE, CHANNEL_WINDOW_SIZE);
+      // The channel writes received data to the sink and closes it on EOF or disconnect.
+      opened.setOutputStream(buffer.sink());
+      in = buffer;
       try {
-        in = new TimeoutInputStream(opened.getInputStream(),
-            () -> opened.isConnected() && !opened.isEOF());
         out = opened.getOutputStream();
         opened.connect(timeout);
         if (!opened.isConnected()) {
@@ -389,30 +424,53 @@ public final class ProxyJump implements ReadTimeoutProxy {
         channel.disconnect();
         channel = null;
       }
-      in = null;
+      if (in != null) {
+        in.close();
+        in = null;
+      }
       out = null;
     }
   }
 
   /**
-   * Adds a read timeout to a channel's piped stream, which has none of its own.
-   *
-   * <p>
-   * Waits on the pipe's monitor, which the writer notifies on flush. After consuming data it
-   * notifies a writer waiting for space: {@link java.io.PipedInputStream} only does so when a read
-   * finds the pipe empty, so without it the writer sleeps for up to a second per full pipe.
+   * Bounded byte queue from a hop channel to the session tunnelled through it. The channel writes
+   * received data on the hop session's reader thread; the tunnelled session reads it on its own.
+   * Unlike {@link java.io.PipedInputStream} it does not care which threads use it, wakes a waiting
+   * side at once, and can bound a read by a timeout. It grows up to a limit before blocking the
+   * writer, which is how a slow reader throttles the hop.
    */
-  static final class TimeoutInputStream extends FilterInputStream {
-    // Bounds a wait whose notification was missed.
-    private static final long MAX_WAIT_MILLIS = 100;
-
-    private final BooleanSupplier open;
-    private final byte[] singleByte = new byte[1];
+  static final class TunnelBuffer extends InputStream {
+    private final int limit;
+    private byte[] ring;
+    private int head; // index of the next byte to read
+    private int count; // bytes waiting to be read
+    private boolean closed; // no more data will flow, in either direction
     private volatile int timeout;
+    private final OutputStream sink = new OutputStream() {
+      @Override
+      public void write(int b) throws IOException {
+        put(new byte[] {(byte) b}, 0, 1);
+      }
 
-    TimeoutInputStream(InputStream in, BooleanSupplier open) {
-      super(in);
-      this.open = open;
+      @Override
+      public void write(byte[] b, int off, int len) throws IOException {
+        put(b, off, len);
+      }
+
+      @Override
+      public void close() {
+        TunnelBuffer.this.close();
+      }
+    };
+
+    TunnelBuffer(int initialSize, int limit) {
+      this.ring = new byte[initialSize];
+      this.limit = Math.max(initialSize, limit);
+    }
+
+    /** The stream the channel writes received data to. */
+    OutputStream sink() {
+      return sink;
     }
 
     void setTimeout(int timeout) {
@@ -420,13 +478,18 @@ public final class ProxyJump implements ReadTimeoutProxy {
     }
 
     @Override
-    public int read() throws IOException {
-      int count = read(singleByte, 0, 1);
-      return count < 0 ? -1 : singleByte[0] & 0xff;
+    public synchronized int available() {
+      return count;
     }
 
     @Override
-    public int read(byte[] bytes, int offset, int length) throws IOException {
+    public int read() throws IOException {
+      byte[] single = new byte[1];
+      return read(single, 0, 1) < 0 ? -1 : single[0] & 0xff;
+    }
+
+    @Override
+    public synchronized int read(byte[] bytes, int offset, int length) throws IOException {
       if (offset < 0 || length < 0 || offset > bytes.length - length) {
         throw new IndexOutOfBoundsException();
       }
@@ -434,34 +497,77 @@ public final class ProxyJump implements ReadTimeoutProxy {
         return 0;
       }
       int readTimeout = timeout;
-      if (readTimeout == 0) {
-        return in.read(bytes, offset, length);
-      }
-      long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readTimeout);
-      // Holding the pipe's monitor keeps the writer from adding data between the checks below, so
-      // an empty pipe on a closed channel really is the end of the stream.
-      synchronized (in) {
-        while (true) {
-          int available = in.available();
-          if (available > 0) {
-            int count = in.read(bytes, offset, Math.min(length, available));
-            in.notifyAll();
-            return count;
-          }
-          if (!open.getAsBoolean()) {
-            return -1;
-          }
-          long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
-          if (remaining <= 0) {
+      long deadline =
+          readTimeout > 0 ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readTimeout) : 0;
+      while (count == 0) {
+        if (closed) {
+          return -1;
+        }
+        long left = 0;
+        if (deadline != 0) {
+          left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+          if (left <= 0) {
             throw new SocketTimeoutException("ProxyJump read timed out");
           }
-          try {
-            in.wait(Math.min(remaining, MAX_WAIT_MILLIS));
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new InterruptedIOException("ProxyJump read interrupted");
-          }
         }
+        await(left);
+      }
+      int n = Math.min(length, count);
+      int first = Math.min(n, ring.length - head);
+      System.arraycopy(ring, head, bytes, offset, first);
+      System.arraycopy(ring, 0, bytes, offset + first, n - first);
+      head = (head + n) % ring.length;
+      count -= n;
+      notifyAll();
+      return n;
+    }
+
+    /** Ends the stream: a reader drains what is buffered and then sees EOF, a writer fails. */
+    @Override
+    public synchronized void close() {
+      closed = true;
+      notifyAll();
+    }
+
+    private synchronized void put(byte[] bytes, int offset, int length) throws IOException {
+      while (length > 0) {
+        while (!closed && count == ring.length && !grow()) {
+          await(0);
+        }
+        if (closed) {
+          throw new IOException("ProxyJump tunnel closed");
+        }
+        int n = Math.min(length, ring.length - count);
+        int tail = (head + count) % ring.length;
+        int first = Math.min(n, ring.length - tail);
+        System.arraycopy(bytes, offset, ring, tail, first);
+        System.arraycopy(bytes, offset + first, ring, 0, n - first);
+        count += n;
+        offset += n;
+        length -= n;
+        notifyAll();
+      }
+    }
+
+    private boolean grow() {
+      if (ring.length >= limit) {
+        return false;
+      }
+      byte[] bigger = new byte[(int) Math.min(2L * ring.length, limit)];
+      int first = Math.min(count, ring.length - head);
+      System.arraycopy(ring, head, bigger, 0, first);
+      System.arraycopy(ring, 0, bigger, first, count - first);
+      ring = bigger;
+      head = 0;
+      return true;
+    }
+
+    private void await(long millis) throws InterruptedIOException {
+      try {
+        wait(millis);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new InterruptedIOException("ProxyJump tunnel interrupted");
       }
     }
   }

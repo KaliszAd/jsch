@@ -10,8 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -22,7 +20,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -96,9 +93,9 @@ class ProxyJumpTest {
     jsch.setConfigRepository(OpenSSHConfig.parse("Host loop\n  ProxyJump loop\n"));
     Session session = jsch.getSession("loop");
     JSchException error = assertThrows(JSchException.class, session::connect);
-    assertEquals("ProxyJump cycle involving loop", error.getMessage());
+    assertEquals("ProxyJump cycle: loop -> loop", error.getMessage());
     error = assertThrows(JSchException.class, session::connect);
-    assertEquals("ProxyJump cycle involving loop", error.getMessage());
+    assertEquals("ProxyJump cycle: loop -> loop", error.getMessage());
   }
 
   @Test
@@ -107,7 +104,38 @@ class ProxyJumpTest {
     jsch.setConfigRepository(OpenSSHConfig.parse(String.join("\n", "Host a", "  User u",
         "  ProxyJump b", "Host b", "  User u", "  ProxyJump a", "")));
     JSchException error = assertThrows(JSchException.class, () -> jsch.getSession("a").connect());
-    assertEquals("ProxyJump cycle involving a", error.getMessage());
+    assertEquals("ProxyJump cycle: b -> a -> b", error.getMessage());
+  }
+
+  @Test
+  void jumpThroughHostThatJumpsBackToUnproxiedAliasIsNotACycle() throws Exception {
+    // With an explicit proxy the target's own config is not part of the chain: b jumps through a,
+    // whose config has no ProxyJump, so the chain ends there.
+    int port = closedPort();
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse(String.join("\n", "Host a", "  User u",
+        "  HostName 127.0.0.1", "  Port " + port, "Host b", "  User u", "  ProxyJump a", "")));
+    Session target = jsch.getSession("u", "a");
+    target.setProxy(new ProxyJump(target, "b"));
+    JSchException error = assertThrows(JSchException.class, () -> target.connect(2000));
+    assertFalse(error.getMessage().contains("cycle"), error.getMessage());
+  }
+
+  @Test
+  void throughRequiresConnectedHopAndClosesNothingItDoesNotOwn() throws Exception {
+    JSch jsch = new JSch();
+    Session hop = jsch.getSession("u", "hop");
+    Session target = jsch.getSession("u", "target");
+    target.setProxy(ProxyJump.through(hop));
+    JSchException error = assertThrows(JSchException.class, () -> target.connect(1000));
+    assertTrue(error.getMessage().contains("hop hop is not connected"), error.getMessage());
+    assertThrows(NullPointerException.class, () -> ProxyJump.through(null));
+  }
+
+  private static int closedPort() throws java.io.IOException {
+    try (ServerSocket closed = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+      return closed.getLocalPort();
+    }
   }
 
   @Test
@@ -277,65 +305,67 @@ class ProxyJumpTest {
   }
 
   @Test
-  void channelStreamHonorsReadTimeoutAndDisconnect() throws Exception {
-    AtomicBoolean connected = new AtomicBoolean(true);
-    try (PipedInputStream pipe = new PipedInputStream();
-        PipedOutputStream writer = new PipedOutputStream(pipe);
-        ProxyJump.TimeoutInputStream stream =
-            new ProxyJump.TimeoutInputStream(pipe, connected::get)) {
-      stream.setTimeout(50);
-      assertThrows(SocketTimeoutException.class, stream::read);
-      writer.write(42);
-      assertEquals(42, stream.read());
-      connected.set(false);
-      assertEquals(-1, stream.read());
-    }
+  void tunnelHonorsReadTimeoutAndDrainsBeforeEndOfStream() throws Exception {
+    ProxyJump.TunnelBuffer tunnel = new ProxyJump.TunnelBuffer(16, 16);
+    tunnel.setTimeout(50);
+    assertThrows(SocketTimeoutException.class, tunnel::read);
+    tunnel.sink().write(42);
+    assertEquals(42, tunnel.read());
+    tunnel.sink().write(new byte[] {1, 2, 3});
+    tunnel.sink().close();
+    byte[] buffer = new byte[8];
+    assertEquals(3, tunnel.read(buffer, 0, buffer.length));
+    assertEquals(-1, tunnel.read());
+    assertThrows(java.io.IOException.class, () -> tunnel.sink().write(1));
   }
 
   @Test
-  void timedReadDrainsBufferedDataBeforeEndOfStream() throws Exception {
-    AtomicBoolean connected = new AtomicBoolean(true);
-    try (PipedInputStream pipe = new PipedInputStream();
-        PipedOutputStream writer = new PipedOutputStream(pipe);
-        ProxyJump.TimeoutInputStream stream =
-            new ProxyJump.TimeoutInputStream(pipe, connected::get)) {
-      stream.setTimeout(1000);
-      writer.write(new byte[] {1, 2, 3});
-      connected.set(false);
-      byte[] buffer = new byte[8];
-      assertEquals(3, stream.read(buffer, 0, buffer.length));
-      assertEquals(-1, stream.read());
-    }
-  }
-
-  @Test
-  void timedReadDoesNotStallWriterOnFullPipe() throws Exception {
+  void tunnelWrapsGrowsAndNeverStallsWriter() throws Exception {
     byte[] data = new byte[256 * 1024];
     new java.util.Random(1).nextBytes(data);
-    try (PipedInputStream pipe = new PipedInputStream(1024);
-        PipedOutputStream writer = new PipedOutputStream(pipe);
-        ProxyJump.TimeoutInputStream stream = new ProxyJump.TimeoutInputStream(pipe, () -> true)) {
-      stream.setTimeout(5000);
-      Thread producer = new Thread(() -> {
-        try {
-          for (int i = 0; i < data.length; i += 4096) {
-            writer.write(data, i, 4096);
-            writer.flush();
-          }
-        } catch (Exception e) {
-          // reported by the reader timing out
+    ProxyJump.TunnelBuffer tunnel = new ProxyJump.TunnelBuffer(1024, 4096);
+    tunnel.setTimeout(5000);
+    Thread producer = new Thread(() -> {
+      try {
+        for (int i = 0, step = 1; i < data.length; i += step, step = step % 4093 + 1) {
+          tunnel.sink().write(data, i, Math.min(step, data.length - i));
         }
-      });
-      // Before the fix the writer slept for a second on every full pipe: over 4 minutes here.
-      ByteArrayOutputStream received = new ByteArrayOutputStream();
-      assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
-        producer.start();
-        byte[] buffer = new byte[8192];
-        while (received.size() < data.length) {
-          received.write(buffer, 0, stream.read(buffer, 0, buffer.length));
-        }
-      });
-      assertArrayEquals(data, received.toByteArray());
-    }
+        tunnel.sink().close();
+      } catch (Exception e) {
+        // reported by the reader timing out
+      }
+    });
+    ByteArrayOutputStream received = new ByteArrayOutputStream();
+    assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+      producer.start();
+      byte[] buffer = new byte[8192];
+      for (int n; (n = tunnel.read(buffer, 0, buffer.length)) >= 0;) {
+        received.write(buffer, 0, n);
+      }
+    });
+    assertArrayEquals(data, received.toByteArray());
+  }
+
+  @Test
+  void closingTunnelReleasesBlockedWriter() throws Exception {
+    ProxyJump.TunnelBuffer tunnel = new ProxyJump.TunnelBuffer(4, 4);
+    tunnel.sink().write(new byte[4]);
+    List<String> failures = new ArrayList<>();
+    Thread writer = new Thread(() -> {
+      try {
+        tunnel.sink().write(1);
+      } catch (java.io.IOException e) {
+        failures.add(e.getMessage());
+      }
+    });
+    writer.start();
+    assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+      while (writer.getState() != Thread.State.WAITING) {
+        Thread.sleep(5);
+      }
+      tunnel.close();
+      writer.join();
+    });
+    assertEquals(Arrays.asList("ProxyJump tunnel closed"), failures);
   }
 }
