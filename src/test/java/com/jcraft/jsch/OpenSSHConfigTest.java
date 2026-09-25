@@ -3,6 +3,7 @@ package com.jcraft.jsch;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -135,15 +136,24 @@ class OpenSSHConfigTest {
   }
 
   @Test
-  void includeExpandsLiteralPercentAndSkipsMissingEnvironmentVariable() throws IOException {
+  void includeExpandsLiteralPercent() throws IOException {
     Path included = tempDir.resolve("%literal.conf");
     write(included, "Host target\n User included\n");
     Path main = tempDir.resolve("config");
-    write(main, "Include ${JSCH_UNSET_INCLUDE_TEST_90748}/missing.conf\n"
-        + "Include %%literal.conf\n");
+    write(main, "Include %%literal.conf\n");
 
     assertEquals("included",
         OpenSSHConfig.parseFile(main.toString(), tempDir).getConfig("target").getUser());
+  }
+
+  @Test
+  void unsetIncludeEnvironmentVariableReportsError() throws IOException {
+    Path main = tempDir.resolve("config");
+    write(main, "Include ${JSCH_UNSET_INCLUDE_TEST_90748}/missing.conf\n");
+
+    IOException error = assertThrows(IOException.class,
+        () -> OpenSSHConfig.parseFile(main.toString(), tempDir));
+    assertTrue(error.getCause().getMessage().contains("JSCH_UNSET_INCLUDE_TEST_90748"));
   }
 
   @Test

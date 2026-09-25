@@ -8,9 +8,6 @@ final class ConfigTokenExpander {
 
   static String expandPath(String path, Function<Character, String> tokens) throws JSchException {
     String expanded = expand(path, tokens, true);
-    if (expanded == null) {
-      return null;
-    }
     if (expanded.equals("~") || expanded.startsWith("~/")) {
       expanded = System.getProperty("user.home") + expanded.substring(1);
     }
@@ -42,9 +39,10 @@ final class ConfigTokenExpander {
         if (end < 0) {
           throw new JSchException("Incomplete config path environment variable: " + path);
         }
-        String value = System.getenv(path.substring(i + 2, end));
+        String name = path.substring(i + 2, end);
+        String value = System.getenv(name);
         if (value == null) {
-          return null;
+          throw new JSchException("Undefined config path environment variable: " + name);
         }
         expanded.append(value);
         i = end;

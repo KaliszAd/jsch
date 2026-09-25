@@ -3702,11 +3702,9 @@ public class Session {
     value = config.getValue("UserKnownHostsFile");
     if (value != null) {
       String path = ConfigTokenExpander.expandPath(value, this::resolveConfigToken);
-      if (path != null) {
-        KnownHosts kh = new KnownHosts(jsch);
-        kh.setKnownHosts(path);
-        this.setHostKeyRepository(kh);
-      }
+      KnownHosts kh = new KnownHosts(jsch);
+      kh.setKnownHosts(path);
+      this.setHostKeyRepository(kh);
     }
 
     String[] values = config.getValues("IdentityFile");
@@ -3718,9 +3716,7 @@ public class Session {
           continue;
         }
         String ifile = ConfigTokenExpander.expandPath(valuePath, this::resolveConfigToken);
-        if (ifile != null) {
-          ir.add(IdentityFile.newInstance(ifile, null, jsch.instLogger));
-        }
+        ir.add(IdentityFile.newInstance(ifile, null, jsch.instLogger));
       }
       this.setIdentityRepository(ir);
     }
@@ -3767,7 +3763,7 @@ public class Session {
       case 'u':
         return System.getProperty("user.name");
       case 'k':
-        return hostKeyAlias != null ? hostKeyAlias : host;
+        return hostKeyAlias != null ? hostKeyAlias : org_host;
       default:
         return null;
     }

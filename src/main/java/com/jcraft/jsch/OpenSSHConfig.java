@@ -412,9 +412,6 @@ public class OpenSSHConfig implements ConfigRepository {
     } catch (JSchException e) {
       throw new IOException("Invalid Include path: " + pattern, e);
     }
-    if (name == null) {
-      return Collections.emptyList();
-    }
     if (name.startsWith("~") && !name.equals("~") && !name.startsWith("~/")) {
       throw new IOException("Unsupported Include home path: " + pattern);
     }

@@ -54,4 +54,24 @@ class SessionIdentityFileTokenTest {
     assertEquals(tempDir.resolve("alias-known_hosts").toString(),
         session.getHostKeyRepository().getKnownHostsRepositoryID());
   }
+
+  @Test
+  void hostKeyAliasTokenDefaultsToOriginalHost() throws Exception {
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse("Host alias\n HostName real.example\n"
+        + " UserKnownHostsFile " + tempDir + "/%k-known_hosts\n"));
+
+    Session session = jsch.getSession("alias");
+    assertEquals(tempDir.resolve("alias-known_hosts").toString(),
+        session.getHostKeyRepository().getKnownHostsRepositoryID());
+  }
+
+  @Test
+  void unsetEnvironmentVariableRejectsTrustStore() throws Exception {
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse(
+        "Host alias\n UserKnownHostsFile ${JSCH_UNSET_KNOWN_HOSTS_TEST_90748}/known_hosts\n"));
+
+    assertThrows(JSchException.class, () -> jsch.getSession("alias"));
+  }
 }
