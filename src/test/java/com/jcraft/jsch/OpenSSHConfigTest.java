@@ -107,6 +107,16 @@ class OpenSSHConfigTest {
   }
 
   @Test
+  void matchHostUsesTheSameLiteralPercentExpansionAsSession() throws Exception {
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse("Host alias\n HostName a%%h\n"
+        + "Match host a%h\n Port 2222\n"));
+
+    assertEquals(2222, jsch.getSession("alias").getPort());
+    assertEquals("a%h", jsch.getSession("alias").getHost());
+  }
+
+  @Test
   void channelUsesOriginalMatchUserEvaluation() throws Exception {
     String remoteUser = "jsch-match-remote-user";
     JSch jsch = new JSch();

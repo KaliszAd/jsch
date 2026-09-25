@@ -548,6 +548,24 @@ public class OpenSSHConfig implements ConfigRepository {
     return positive;
   }
 
+  private static String expandHostNameForMatch(String value, String originalHost) {
+    // Session rejects unsupported HostName tokens; Match must see the supported forms identically.
+    StringBuilder expanded = new StringBuilder();
+    for (int i = 0; i < value.length(); i++) {
+      char ch = value.charAt(i);
+      if (ch == '%' && i + 1 < value.length()) {
+        char token = value.charAt(i + 1);
+        if (token == 'h' || token == '%') {
+          expanded.append(token == 'h' ? originalHost : "%");
+          i++;
+          continue;
+        }
+      }
+      expanded.append(ch);
+    }
+    return expanded.toString();
+  }
+
   @Override
   public Config getConfig(String host) {
     return new MyConfig(host, null);
@@ -612,7 +630,7 @@ public class OpenSSHConfig implements ConfigRepository {
           _configs.addElement(section.options);
           for (String[] option : section.options) {
             if (!hostnameSet && option[0].equalsIgnoreCase("HostName")) {
-              effectiveHost = option[1].replace("%h", host);
+              effectiveHost = expandHostNameForMatch(option[1], host);
               hostnameSet = true;
             } else if (!userSet && option[0].equalsIgnoreCase("User")) {
               remoteUser = option[1];
