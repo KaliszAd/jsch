@@ -449,10 +449,21 @@ class OpenSSHConfigTest {
   }
 
   @Test
-  void matchCriteriaJSchCannotEvaluateFailClosed() {
-    IOException exec =
-        assertThrows(IOException.class, () -> OpenSSHConfig.parse("Match exec true\n  Port 1\n"));
+  void matchCriteriaJSchCannotEvaluateFailClosed() throws IOException {
+    IOException exec = assertThrows(IOException.class,
+        () -> OpenSSHConfig.parse("Host a\n  Port 2\nMatch exec true\n  Port 1\n"));
+    assertTrue(exec.getMessage().startsWith("ssh config:3: Unsupported Match criterion: exec"),
+        exec.getMessage());
     assertTrue(exec.getMessage().contains("never runs commands"), exec.getMessage());
+
+    Path included = tempDir.resolve("exec.conf");
+    Files.write(included, "Host b\nMatch exec true\n".getBytes(StandardCharsets.UTF_8));
+    Path main = tempDir.resolve("main.conf");
+    Files.write(main, ("Host a\nInclude " + included + "\n").getBytes(StandardCharsets.UTF_8));
+    IOException fromInclude =
+        assertThrows(IOException.class, () -> OpenSSHConfig.parseFile(main.toString()));
+    assertTrue(fromInclude.getMessage().startsWith(main + ":2: " + included + ":2: "),
+        "names the include line and the offending line: " + fromInclude.getMessage());
     for (String criterion : new String[] {"command ls", "sessiontype shell", "bogus x"}) {
       assertThrows(IOException.class,
           () -> OpenSSHConfig.parse("Match " + criterion + "\n  Port 1\n"), criterion);

@@ -134,7 +134,7 @@ public class OpenSSHConfig implements ConfigRepository {
   public static OpenSSHConfig parse(String conf) throws IOException {
     try (Reader r = new StringReader(conf)) {
       try (BufferedReader br = new BufferedReader(r)) {
-        return new OpenSSHConfig(br, userSshDirectory());
+        return new OpenSSHConfig(br, "ssh config", userSshDirectory(), new HashSet<>());
       }
     }
   }
@@ -156,7 +156,7 @@ public class OpenSSHConfig implements ConfigRepository {
     try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
       Set<Path> activeFiles = new HashSet<>();
       activeFiles.add(path.toRealPath());
-      return new OpenSSHConfig(br, includeBase, activeFiles);
+      return new OpenSSHConfig(br, file, includeBase, activeFiles);
     }
   }
 
@@ -177,16 +177,18 @@ public class OpenSSHConfig implements ConfigRepository {
     return Paths.get(Util.getSystemProperty("user.home"), ".ssh");
   }
 
-  OpenSSHConfig(BufferedReader br, Path includeBase) throws IOException {
-    this(br, includeBase, new HashSet<>());
-  }
-
-  private OpenSSHConfig(BufferedReader br, Path includeBase, Set<Path> activeFiles)
+  private OpenSSHConfig(BufferedReader br, String source, Path includeBase, Set<Path> activeFiles)
       throws IOException {
     Section global = new Section("", null, Collections.emptyList(), Collections.emptyList());
     sections.add(global);
-    parse(br, includeBase, activeFiles, 0, global, Collections.emptyList(),
-        Collections.emptyList());
+    try {
+      parse(br, source, includeBase, activeFiles, 0, global, Collections.emptyList(),
+          Collections.emptyList());
+    } catch (IOException e) {
+      // The message names the file and line, so an application that only logs still shows why.
+      JSch.getLogger().log(Logger.ERROR, "Cannot use OpenSSH config: " + e.getMessage());
+      throw e;
+    }
   }
 
   private static final class Section {
@@ -211,13 +213,19 @@ public class OpenSSHConfig implements ConfigRepository {
   // OpenSSH re-reads the config once more when it has a non-negated "Match final".
   private boolean wantFinalPass;
 
-  private void parse(BufferedReader br, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current, List<String> enclosingHosts, List<MatchExpression> enclosingMatches)
-      throws IOException {
+  private void parse(BufferedReader br, String source, Path includeBase, Set<Path> activeFiles,
+      int depth, Section current, List<String> enclosingHosts,
+      List<MatchExpression> enclosingMatches) throws IOException {
     String line;
+    int lineNumber = 0;
     while ((line = br.readLine()) != null) {
-      current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts,
-          enclosingMatches);
+      lineNumber++;
+      try {
+        current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts,
+            enclosingMatches);
+      } catch (IOException e) {
+        throw new IOException(source + ":" + lineNumber + ": " + e.getMessage(), e);
+      }
     }
   }
 
@@ -323,8 +331,8 @@ public class OpenSSHConfig implements ConfigRepository {
     try (BufferedReader included = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
       Section includedContext = new Section("", null, enclosingHosts, enclosingMatches);
       sections.add(includedContext);
-      parse(included, includeBase, activeFiles, depth + 1, includedContext, enclosingHosts,
-          enclosingMatches);
+      parse(included, path.toString(), includeBase, activeFiles, depth + 1, includedContext,
+          enclosingHosts, enclosingMatches);
     } finally {
       activeFiles.remove(realPath);
     }
