@@ -65,9 +65,6 @@ public final class ProxyJump implements Proxy {
     if (hop.port != 0) {
       next.setPort(hop.port);
     }
-    if (target.getUserInfo() != null) {
-      next.setUserInfo(target.getUserInfo());
-    }
     if (previous != null) {
       next.setProxy(new ChannelProxy(previous));
     } else if (socketFactory != null) {
@@ -159,7 +156,7 @@ public final class ProxyJump implements Proxy {
   }
 
   private static Hop parseHostHop(String item) {
-    int at = item.indexOf('@');
+    int at = item.lastIndexOf('@');
     String user = at < 0 ? null : item.substring(0, at);
     String address = item.substring(at + 1);
     if (address.startsWith("[")) {

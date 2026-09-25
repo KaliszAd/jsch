@@ -2306,7 +2306,6 @@ public class Session {
         synchronized (proxy) {
           proxy.close();
         }
-        proxy = null;
       }
     } catch (Exception e) {
       // e.printStackTrace();

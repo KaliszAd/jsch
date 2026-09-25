@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 class ProxyJumpTest {
   @Test
   void parsesHopChain() throws Exception {
-    List<ProxyJump.Hop> hops = ProxyJump.parse("alice@first:2222,ssh://bob@[::1]:2200,last");
+    List<ProxyJump.Hop> hops = ProxyJump.parse("alice@corp@first:2222,ssh://bob@[::1]:2200,last");
     assertEquals(3, hops.size());
-    assertEquals("alice", hops.get(0).user);
+    assertEquals("alice@corp", hops.get(0).user);
     assertEquals("first", hops.get(0).host);
     assertEquals(2222, hops.get(0).port);
     assertEquals("bob", hops.get(1).user);
@@ -45,6 +45,8 @@ class ProxyJumpTest {
     jsch.setConfigRepository(OpenSSHConfig.parse("Host loop\n  ProxyJump loop\n"));
     Session session = jsch.getSession("loop");
     JSchException error = assertThrows(JSchException.class, session::connect);
+    assertEquals("ProxyJump cycle involving loop", error.getMessage());
+    error = assertThrows(JSchException.class, session::connect);
     assertEquals("ProxyJump cycle involving loop", error.getMessage());
   }
 }
