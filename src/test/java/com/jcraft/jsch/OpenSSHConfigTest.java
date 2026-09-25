@@ -73,10 +73,10 @@ class OpenSSHConfigTest {
 
   @Test
   void matchConditionsUseEffectiveHostAndRemoteUser() throws IOException {
-    OpenSSHConfig config = OpenSSHConfig.parse("Host alias\n HostName real.example\n"
-        + "Match host real.example user deploy\n Port 2222\n"
-        + "Match originalhost alias localuser " + System.getProperty("user.name")
-        + "\n User matched\nMatch all\n ForwardAgent yes\n");
+    OpenSSHConfig config = OpenSSHConfig.parse(
+        "Host alias\n HostName real.example\n" + "Match host real.example user deploy\n Port 2222\n"
+            + "Match originalhost alias localuser " + System.getProperty("user.name")
+            + "\n User matched\nMatch all\n ForwardAgent yes\n");
 
     assertEquals(2222, config.getConfig("alias", "deploy").getPort());
     assertEquals(-1, config.getConfig("alias", "other").getPort());
@@ -110,8 +110,8 @@ class OpenSSHConfigTest {
   void channelUsesOriginalMatchUserEvaluation() throws Exception {
     String remoteUser = "jsch-match-remote-user";
     JSch jsch = new JSch();
-    jsch.setConfigRepository(OpenSSHConfig.parse("Match user " + remoteUser
-        + "\n ForwardAgent yes\nHost prod\n User " + remoteUser + "\n"));
+    jsch.setConfigRepository(OpenSSHConfig.parse(
+        "Match user " + remoteUser + "\n ForwardAgent yes\nHost prod\n User " + remoteUser + "\n"));
 
     Session inferredUser = jsch.getSession("prod");
     ChannelExec inferredChannel = new ChannelExec();

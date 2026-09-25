@@ -100,8 +100,8 @@ public class OpenSSHConfig implements ConfigRepository {
    *
    * Include directives in {@code conf} may read additional files. Only parse trusted config text.
    * JSch does not impose OpenSSH's file owner/mode checks because embedded applications may use
-   * application-managed files or filesystems without POSIX permissions; callers must enforce
-   * their own trust policy.
+   * application-managed files or filesystems without POSIX permissions; callers must enforce their
+   * own trust policy.
    *
    * @param conf string, which includes OpenSSH's config
    * @return an instanceof OpenSSHConfig
@@ -115,9 +115,9 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   /**
-   * Parses the given file, and returns an instance of ConfigRepository.
-   * Included files are read without owner/mode checks; callers choose which config files are
-   * trusted, including on platforms without POSIX ownership metadata.
+   * Parses the given file, and returns an instance of ConfigRepository. Included files are read
+   * without owner/mode checks; callers choose which config files are trusted, including on
+   * platforms without POSIX ownership metadata.
    *
    * @param file OpenSSH's config file
    * @return an instanceof OpenSSHConfig
@@ -282,8 +282,8 @@ public class OpenSSHConfig implements ConfigRepository {
       }
       int equals = attribute.indexOf('=');
       String pattern = equals < 0 ? null : attribute.substring(equals + 1);
-      String type = (equals < 0 ? attribute : attribute.substring(0, equals))
-          .toLowerCase(Locale.ROOT);
+      String type =
+          (equals < 0 ? attribute : attribute.substring(0, equals)).toLowerCase(Locale.ROOT);
       if (type.equals("all")) {
         if (arguments.size() != 1) {
           throw new IOException("Match all cannot be combined with other criteria");
@@ -337,8 +337,8 @@ public class OpenSSHConfig implements ConfigRepository {
         default:
           return false;
       }
-      boolean matched = candidate != null
-          && matchesPatternList(pattern, Util.str2byte(candidate), ",");
+      boolean matched =
+          candidate != null && matchesPatternList(pattern, Util.str2byte(candidate), ",");
       return negated ? !matched : matched;
     }
   }
@@ -457,8 +457,8 @@ public class OpenSSHConfig implements ConfigRepository {
       } else {
         PathMatcher matcher;
         try {
-          matcher = prefix.getFileSystem().getPathMatcher("glob:"
-              + segment.replace("{", "\\{").replace("}", "\\}"));
+          matcher = prefix.getFileSystem()
+              .getPathMatcher("glob:" + segment.replace("{", "\\{").replace("}", "\\}"));
         } catch (IllegalArgumentException e) {
           throw new IOException("Invalid Include pattern: " + pattern, e);
         }
@@ -617,8 +617,8 @@ public class OpenSSHConfig implements ConfigRepository {
       }
     }
 
-    private boolean matchOnce(MatchExpression expression, String originalHost,
-        String effectiveHost, String remoteUser, Map<MatchExpression, Boolean> results) {
+    private boolean matchOnce(MatchExpression expression, String originalHost, String effectiveHost,
+        String remoteUser, Map<MatchExpression, Boolean> results) {
       Boolean result = results.get(expression);
       if (result == null) {
         result = expression.matches(originalHost, effectiveHost, remoteUser);
