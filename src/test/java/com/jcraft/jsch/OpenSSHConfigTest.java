@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -73,10 +74,10 @@ class OpenSSHConfigTest {
 
   @Test
   void matchConditionsUseEffectiveHostAndRemoteUser() throws IOException {
-    OpenSSHConfig config = OpenSSHConfig.parse("Host alias\n HostName real.example\n"
-        + "Match host real.example user deploy\n Port 2222\n"
-        + "Match originalhost alias localuser " + System.getProperty("user.name")
-        + "\n User matched\nMatch all\n ForwardAgent yes\n");
+    OpenSSHConfig config = OpenSSHConfig.parse(
+        "Host alias\n HostName real.example\n" + "Match host real.example user deploy\n Port 2222\n"
+            + "Match originalhost alias localuser " + System.getProperty("user.name")
+            + "\n User matched\nMatch all\n ForwardAgent yes\n");
 
     assertEquals(2222, config.getConfig("alias", "deploy").getPort());
     assertEquals(-1, config.getConfig("alias", "other").getPort());
@@ -109,8 +110,8 @@ class OpenSSHConfigTest {
   @Test
   void matchHostUsesTheSameLiteralPercentExpansionAsSession() throws Exception {
     JSch jsch = new JSch();
-    jsch.setConfigRepository(OpenSSHConfig.parse("Host alias\n HostName a%%h\n"
-        + "Match host a%h\n Port 2222\n"));
+    jsch.setConfigRepository(
+        OpenSSHConfig.parse("Host alias\n HostName a%%h\n" + "Match host a%h\n Port 2222\n"));
 
     assertEquals(2222, jsch.getSession("alias").getPort());
     assertEquals("a%h", jsch.getSession("alias").getHost());
@@ -120,8 +121,8 @@ class OpenSSHConfigTest {
   void channelUsesOriginalMatchUserEvaluation() throws Exception {
     String remoteUser = "jsch-match-remote-user";
     JSch jsch = new JSch();
-    jsch.setConfigRepository(OpenSSHConfig.parse("Match user " + remoteUser
-        + "\n ForwardAgent yes\nHost prod\n User " + remoteUser + "\n"));
+    jsch.setConfigRepository(OpenSSHConfig.parse(
+        "Match user " + remoteUser + "\n ForwardAgent yes\nHost prod\n User " + remoteUser + "\n"));
 
     Session inferredUser = jsch.getSession("prod");
     ChannelExec inferredChannel = new ChannelExec();
@@ -188,7 +189,8 @@ class OpenSSHConfigTest {
       System.setProperty("user.home", tempDir.toString());
       write(included, "Host target\n User from-home\n");
       write(main, "Include %d/" + included.getFileName() + "\n");
-      assertEquals("from-home", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
+      assertEquals("from-home",
+          OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
     } finally {
       System.setProperty("user.home", originalHome);
     }
@@ -210,8 +212,8 @@ class OpenSSHConfigTest {
     Path main = tempDir.resolve("config");
     write(main, "Include ${JSCH_UNSET_INCLUDE_TEST_90748}/missing.conf\n");
 
-    IOException error = assertThrows(IOException.class,
-        () -> OpenSSHConfig.parseFile(main.toString(), tempDir));
+    IOException error =
+        assertThrows(IOException.class, () -> OpenSSHConfig.parseFile(main.toString(), tempDir));
     assertTrue(error.getCause().getMessage().contains("JSCH_UNSET_INCLUDE_TEST_90748"));
   }
 
@@ -368,5 +370,142 @@ class OpenSSHConfigTest {
 
   private static void write(Path path, String value) throws IOException {
     Files.write(path, value.getBytes(StandardCharsets.UTF_8));
+  }
+
+  @Test
+  void matchFinalRunsSecondPassAgainstResolvedHostLikeOpenSsh() throws IOException {
+    // Checked against OpenSSH 10.0 ssh -G.
+    OpenSSHConfig config = OpenSSHConfig.parse(
+        String.join("\n", "Host alias", "  HostName real.example", "Match final", "  Port 1111",
+            "Host alias", "  User aliasuser", "Host real.example", "  ConnectTimeout 7", ""));
+    ConfigRepository.Config alias = config.getConfig("alias");
+    assertEquals("aliasuser", alias.getUser());
+    assertEquals(1111, alias.getPort());
+    assertEquals("7000", alias.getValue("ConnectTimeout"));
+
+    config = OpenSSHConfig.parse(
+        String.join("\n", "Match final host alias", "  User a", "Match final host real.example",
+            "  Port 2222", "Host alias", "  HostName real.example", ""));
+    assertNull(config.getConfig("alias").getUser());
+    assertEquals(2222, config.getConfig("alias").getPort());
+
+    config = OpenSSHConfig.parse("Match final\n  Port 1\nHost alias\n  Port 2\n");
+    assertEquals(2, config.getConfig("alias").getPort());
+    config = OpenSSHConfig.parse("Match !final\n  User first\n");
+    assertEquals("first", config.getConfig("alias").getUser());
+    config = OpenSSHConfig.parse("Match final all\n  User fin\n");
+    assertEquals("fin", config.getConfig("alias").getUser());
+    assertThrows(IOException.class, () -> OpenSSHConfig.parse("Match all final\n  User x\n"));
+  }
+
+  @Test
+  void finalPassKeepsIdentityFileOrder() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig.parse(String.join("\n", "Host *", "  IdentityFile a",
+        "Host alias", "  IdentityFile b", "Match final", "  IdentityFile c", ""));
+    assertEquals(Arrays.asList("a", "b", "c"),
+        Arrays.asList(config.getConfig("alias").getValues("IdentityFile")));
+  }
+
+  @Test
+  void matchCanonicalNeedsCanonicalizeHostname() throws IOException {
+    assertEquals(-1,
+        OpenSSHConfig.parse("Match canonical\n  Port 5\n").getConfig("alias").getPort());
+    assertEquals(6, OpenSSHConfig.parse("CanonicalizeHostname yes\nMatch canonical\n  Port 6\n")
+        .getConfig("alias").getPort());
+  }
+
+  @Test
+  void matchTaggedSeesTagSetEarlier() throws IOException {
+    assertEquals(7,
+        OpenSSHConfig.parse("Tag foo\nMatch tagged foo\n  Port 7\n").getConfig("alias").getPort());
+    assertEquals(8,
+        OpenSSHConfig.parse("Match tagged \"\"\n  Port 8\n").getConfig("alias").getPort());
+    assertEquals(-1, OpenSSHConfig.parse("Match tagged foo\n  Port 9\nHost *\n  Tag foo\n")
+        .getConfig("alias").getPort());
+    assertEquals(10, OpenSSHConfig.parse("Tag prod-eu\nMatch tagged prod-*,!prod-us\n  Port 10\n")
+        .getConfig("alias").getPort());
+  }
+
+  @Test
+  void matchVersionUsesJSchVersion() throws IOException {
+    assertEquals(11,
+        OpenSSHConfig.parse("Match version JSCH_*\n  Port 11\n").getConfig("alias").getPort());
+    assertEquals(-1,
+        OpenSSHConfig.parse("Match version OpenSSH_*\n  Port 12\n").getConfig("alias").getPort());
+  }
+
+  @Test
+  void matchLocalNetworkChecksInterfacesWithoutResolvingNames() throws IOException {
+    assertEquals(13,
+        OpenSSHConfig.parse("Match localnetwork 192.0.2.0/24,127.0.0.0/8,::1\n" + "  Port 13\n")
+            .getConfig("alias").getPort());
+    assertEquals(-1, OpenSSHConfig.parse("Match localnetwork 192.0.2.0/24\n  Port 14\n")
+        .getConfig("alias").getPort());
+    for (String list : new String[] {"127.0.0.1/8", "localhost", "!10.0.0.0/8", "10.0.0.0/33",
+        "fe80::1%eth0", ""}) {
+      assertThrows(IOException.class,
+          () -> OpenSSHConfig.parse("Match localnetwork \"" + list + "\"\n  Port 1\n"), list);
+    }
+  }
+
+  @Test
+  void matchCriteriaJSchCannotEvaluateFailClosed() {
+    IOException exec =
+        assertThrows(IOException.class, () -> OpenSSHConfig.parse("Match exec true\n  Port 1\n"));
+    assertTrue(exec.getMessage().contains("never runs commands"), exec.getMessage());
+    for (String criterion : new String[] {"command ls", "sessiontype shell", "bogus x"}) {
+      assertThrows(IOException.class,
+          () -> OpenSSHConfig.parse("Match " + criterion + "\n  Port 1\n"), criterion);
+    }
+  }
+
+  @Test
+  void trailingCommentsAreIgnoredLikeOpenSsh() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig.parse(String.join("\n", "Host other # alias", "  Port 20",
+        "Host alias", "  User bob # comment", "  HostName h#1", "  Port # none", ""));
+    assertEquals(-1, config.getConfig("alias").getPort());
+    assertEquals("bob", config.getConfig("alias").getUser());
+    assertEquals("h#1", config.getConfig("alias").getHostname());
+    assertEquals(20, config.getConfig("other").getPort());
+  }
+
+  @Test
+  void includeExpandsCurrentUserHomeButRejectsOtherUsers() throws IOException {
+    String originalHome = System.getProperty("user.home");
+    try {
+      System.setProperty("user.home", tempDir.toString());
+      Files.write(tempDir.resolve("inc.conf"), "Host alias\n  Port 2345\n".getBytes());
+      String user = System.getProperty("user.name");
+      assertEquals(2345,
+          OpenSSHConfig.parse("Include ~" + user + "/inc.conf\n").getConfig("alias").getPort());
+      assertThrows(IOException.class,
+          () -> OpenSSHConfig.parse("Include ~not-" + user + "/inc.conf\n"));
+    } finally {
+      System.setProperty("user.home", originalHome);
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+  void includeAcceptsWindowsHomeSeparator() throws IOException {
+    String originalHome = System.getProperty("user.home");
+    try {
+      System.setProperty("user.home", tempDir.toString());
+      Files.write(tempDir.resolve("inc.conf"), "Host alias\n  Port 2346\n".getBytes());
+      assertEquals(2346, OpenSSHConfig.parse("Include ~\\inc.conf\n").getConfig("alias").getPort());
+    } finally {
+      System.setProperty("user.home", originalHome);
+    }
+  }
+
+  @Test
+  void systemFileResolvesRelativeIncludesAgainstItsDirectory() throws IOException {
+    Path etc = Files.createDirectories(tempDir.resolve("etc-ssh"));
+    Files.createDirectories(etc.resolve("ssh_config.d"));
+    Files.write(etc.resolve("ssh_config.d/10.conf"), "Host alias\n  Port 2347\n".getBytes());
+    Path system = etc.resolve("ssh_config");
+    Files.write(system, "Include ssh_config.d/*.conf\n".getBytes());
+    assertEquals(2347,
+        OpenSSHConfig.parseSystemFile(system.toString()).getConfig("alias").getPort());
   }
 }
