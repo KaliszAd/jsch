@@ -43,8 +43,10 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Hashtable;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.Vector;
 import java.util.stream.Collectors;
@@ -186,6 +188,10 @@ public class OpenSSHConfig implements ConfigRepository {
     }
     String[] keyValue = line.split("[= \t]", 2);
     if (keyValue.length < 2) {
+      if (line.equalsIgnoreCase("Host") || line.equalsIgnoreCase("Match")
+          || line.equalsIgnoreCase("Include")) {
+        throw new IOException(line + " requires an argument");
+      }
       return current;
     }
     String key = keyValue[0].trim();
@@ -263,6 +269,9 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static MatchExpression parseMatch(String value) throws IOException {
+    if (value.isEmpty()) {
+      throw new IOException("Match requires at least one criterion");
+    }
     List<String> arguments = includeArguments(value);
     List<MatchCriterion> criteria = new ArrayList<>();
     for (int i = 0; i < arguments.size(); i++) {
@@ -329,7 +338,7 @@ public class OpenSSHConfig implements ConfigRepository {
           return false;
       }
       boolean matched = candidate != null
-          && matchesHostPatterns(pattern, Util.str2byte(candidate));
+          && matchesPatternList(pattern, Util.str2byte(candidate), ",");
       return negated ? !matched : matched;
     }
   }
@@ -521,8 +530,12 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static boolean matchesHostPatterns(String patternList, byte[] host) {
+    return matchesPatternList(patternList, host, "[ \\t]");
+  }
+
+  private static boolean matchesPatternList(String patternList, byte[] host, String separator) {
     boolean positive = false;
-    for (String pattern : patternList.split("[ \t]")) {
+    for (String pattern : patternList.split(separator)) {
       boolean negate = pattern.startsWith("!");
       String candidate = negate ? pattern.substring(1) : pattern;
       if (Util.glob(Util.str2byte(candidate.trim()), host)) {
@@ -583,16 +596,17 @@ public class OpenSSHConfig implements ConfigRepository {
       String remoteUser = user != null ? user : System.getProperty("user.name");
       boolean hostnameSet = false;
       boolean userSet = user != null;
+      Map<MatchExpression, Boolean> matchResults = new IdentityHashMap<>();
       for (Section section : sections) {
         boolean matches = section.host.isEmpty() || matchesHostPatterns(section.host, _host);
         for (String enclosingHost : section.enclosingHosts) {
           matches &= matchesHostPatterns(enclosingHost, _host);
         }
         if (section.match != null) {
-          matches &= section.match.matches(host, effectiveHost, remoteUser);
+          matches &= matchOnce(section.match, host, effectiveHost, remoteUser, matchResults);
         }
         for (MatchExpression enclosingMatch : section.enclosingMatches) {
-          matches &= enclosingMatch.matches(host, effectiveHost, remoteUser);
+          matches &= matchOnce(enclosingMatch, host, effectiveHost, remoteUser, matchResults);
         }
         if (matches) {
           _configs.addElement(section.options);
@@ -607,6 +621,16 @@ public class OpenSSHConfig implements ConfigRepository {
           }
         }
       }
+    }
+
+    private boolean matchOnce(MatchExpression expression, String originalHost,
+        String effectiveHost, String remoteUser, Map<MatchExpression, Boolean> results) {
+      Boolean result = results.get(expression);
+      if (result == null) {
+        result = expression.matches(originalHost, effectiveHost, remoteUser);
+        results.put(expression, result);
+      }
+      return result;
     }
 
     private String find(String key) {
