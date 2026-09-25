@@ -150,6 +150,7 @@ public class Session {
 
   private Hashtable<String, String> config = null;
   private static final String USER_NAME_PROPERTY = "user.name";
+  private static final String CLEAR_ALL_FORWARDINGS = "ClearAllForwardings";
   private ConfigRepository.Config resolvedConfig;
   private List<Identity> configIdentities;
   private List<Identity> trailingConfigIdentities;
@@ -3713,7 +3714,7 @@ public class Session {
     checkConfig(hostConfig, "PubkeyAcceptedAlgorithms");
     checkConfig(hostConfig, "FingerprintHash");
     checkConfig(hostConfig, "MaxAuthTries");
-    checkConfig(hostConfig, "ClearAllForwardings");
+    checkConfig(hostConfig, CLEAR_ALL_FORWARDINGS);
 
     value = hostConfig.getValue("HostKeyAlias");
     if (value != null)
@@ -3769,9 +3770,9 @@ public class Session {
       setConfig("MaxAuthTries", value);
     }
 
-    value = hostConfig.getValue("ClearAllForwardings");
+    value = hostConfig.getValue(CLEAR_ALL_FORWARDINGS);
     if (value != null) {
-      setConfig("ClearAllForwardings", value);
+      setConfig(CLEAR_ALL_FORWARDINGS, value);
     }
   }
 
@@ -3829,8 +3830,12 @@ public class Session {
         .append(resolveConfigToken('r')).append(resolveConfigToken('j'));
     try {
       // OpenSSH defines %C as the SHA-1 of this string; it only names files, it protects nothing.
-      HASH sha1 = Class.forName(getConfig("sha-1")).asSubclass(HASH.class).getDeclaredConstructor()
-          .newInstance();
+      String hashClass = getConfig("sha-1");
+      if (hashClass == null) {
+        throw new JSchException("no sha-1 hash class is configured");
+      }
+      HASH sha1 =
+          Class.forName(hashClass).asSubclass(HASH.class).getDeclaredConstructor().newInstance();
       sha1.init();
       byte[] bytes = Util.str2byte(input.toString());
       sha1.update(bytes, 0, bytes.length);
@@ -3869,7 +3874,7 @@ public class Session {
 
   private void requestPortForwarding() throws JSchException {
 
-    if (getConfig("ClearAllForwardings").equals("yes"))
+    if (getConfig(CLEAR_ALL_FORWARDINGS).equals("yes"))
       return;
 
     if (resolvedConfig == null) {

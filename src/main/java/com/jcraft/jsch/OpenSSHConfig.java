@@ -282,7 +282,7 @@ public class OpenSSHConfig implements ConfigRepository {
       sections.add(next);
       return next;
     }
-    if (value.isEmpty() && !key.equalsIgnoreCase("Include")) {
+    if (value.isEmpty() && !key.equalsIgnoreCase(INCLUDE)) {
       return current;
     }
     if (key.equalsIgnoreCase(INCLUDE)) {
@@ -378,32 +378,40 @@ public class OpenSSHConfig implements ConfigRepository {
     List<MatchCriterion> criteria = new ArrayList<>();
     int next = 0;
     while (next < arguments.size()) {
-      String attribute = arguments.get(next++);
-      boolean negated = attribute.startsWith("!");
-      if (negated) {
-        attribute = attribute.substring(1);
-      }
-      int equals = attribute.indexOf('=');
-      String type =
-          (equals < 0 ? attribute : attribute.substring(0, equals)).toLowerCase(Locale.ROOT);
-      String pattern = equals < 0 ? null : attribute.substring(equals + 1);
-      if (MatchCriterion.WITHOUT_ARGUMENT.contains(type)) {
-        if (type.equals("all") && (next != arguments.size() || !onlyPassCriteria(criteria))) {
-          throw new IOException("Match all cannot be combined with other criteria");
-        }
-        criteria.add(new MatchCriterion(type, null, negated));
-        continue;
-      }
-      rejectUnsupported(type);
-      if (pattern == null && next < arguments.size()) {
-        pattern = arguments.get(next++);
-      }
-      if (pattern == null || (pattern.isEmpty() && !type.equals(MatchCriterion.TAGGED))) {
-        throw new IOException("Missing Match pattern for " + type);
-      }
-      criteria.add(new MatchCriterion(type, pattern, negated));
+      next = addCriterion(arguments, next, criteria);
     }
     return new MatchExpression(criteria);
+  }
+
+  /** Parses the criterion at {@code index}, appends it, and returns the index after its words. */
+  private static int addCriterion(List<String> arguments, int index, List<MatchCriterion> criteria)
+      throws IOException {
+    String attribute = arguments.get(index);
+    int next = index + 1;
+    boolean negated = attribute.startsWith("!");
+    if (negated) {
+      attribute = attribute.substring(1);
+    }
+    int equals = attribute.indexOf('=');
+    String type =
+        (equals < 0 ? attribute : attribute.substring(0, equals)).toLowerCase(Locale.ROOT);
+    String pattern = equals < 0 ? null : attribute.substring(equals + 1);
+    if (MatchCriterion.WITHOUT_ARGUMENT.contains(type)) {
+      if (type.equals("all") && (next != arguments.size() || !onlyPassCriteria(criteria))) {
+        throw new IOException("Match all cannot be combined with other criteria");
+      }
+      criteria.add(new MatchCriterion(type, null, negated));
+      return next;
+    }
+    rejectUnsupported(type);
+    if (pattern == null && next < arguments.size()) {
+      pattern = arguments.get(next++);
+    }
+    if (pattern == null || (pattern.isEmpty() && !type.equals(MatchCriterion.TAGGED))) {
+      throw new IOException("Missing Match pattern for " + type);
+    }
+    criteria.add(new MatchCriterion(type, pattern, negated));
+    return next;
   }
 
   private static void rejectUnsupported(String type) throws IOException {
