@@ -1,8 +1,11 @@
 package com.jcraft.jsch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -79,6 +82,53 @@ class OpenSSHConfigTest {
     assertEquals(-1, config.getConfig("alias", "other").getPort());
     assertEquals("matched", config.getConfig("alias").getUser());
     assertEquals("yes", config.getConfig("elsewhere").getValue("ForwardAgent"));
+  }
+
+  @Test
+  void matchPatternListsUseCommasAndRespectNegation() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig.parse("Match !host bastion,jump\n"
+        + " StrictHostKeyChecking no\nMatch host *.corp,!legacy.corp\n Port 2222\n");
+
+    assertNull(config.getConfig("bastion").getValue("StrictHostKeyChecking"));
+    assertNull(config.getConfig("jump").getValue("StrictHostKeyChecking"));
+    assertEquals("no", config.getConfig("other").getValue("StrictHostKeyChecking"));
+    assertEquals(2222, config.getConfig("new.corp").getPort());
+    assertEquals(-1, config.getConfig("legacy.corp").getPort());
+  }
+
+  @Test
+  void enclosingMatchIsEvaluatedOnceBeforeIncludedHostNameChanges() throws IOException {
+    Path child = tempDir.resolve("child.conf");
+    write(child, "HostName real.example\nHost *\n Port 2222\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Match host alias\n Include " + child + "\n");
+
+    assertEquals(2222, OpenSSHConfig.parseFile(main.toString()).getConfig("alias").getPort());
+  }
+
+  @Test
+  void channelUsesOriginalMatchUserEvaluation() throws Exception {
+    String remoteUser = "jsch-match-remote-user";
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(OpenSSHConfig.parse("Match user " + remoteUser
+        + "\n ForwardAgent yes\nHost prod\n User " + remoteUser + "\n"));
+
+    Session inferredUser = jsch.getSession("prod");
+    ChannelExec inferredChannel = new ChannelExec();
+    inferredUser.applyConfigChannel(inferredChannel);
+    assertFalse(inferredChannel.agent_forwarding);
+
+    Session explicitUser = jsch.getSession(remoteUser, "prod");
+    ChannelExec explicitChannel = new ChannelExec();
+    explicitUser.applyConfigChannel(explicitChannel);
+    assertTrue(explicitChannel.agent_forwarding);
+  }
+
+  @Test
+  void bareScopeDirectivesFailInsteadOfLeakingPreviousScope() {
+    assertThrows(IOException.class, () -> OpenSSHConfig.parse("Host target\nMatch\n Port 2222\n"));
+    assertThrows(IOException.class, () -> OpenSSHConfig.parse("Host target\nInclude\n"));
+    assertThrows(IOException.class, () -> OpenSSHConfig.parse("Host\n"));
   }
 
   @Test
