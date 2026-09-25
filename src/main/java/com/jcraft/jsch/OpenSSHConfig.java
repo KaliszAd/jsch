@@ -32,8 +32,14 @@ import java.io.Reader;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
@@ -51,6 +57,7 @@ import java.util.stream.Stream;
  * <li>User</li>
  * <li>Hostname</li>
  * <li>Port</li>
+ * <li>Include</li>
  * <li>PreferredAuthentications</li>
  * <li>PubkeyAcceptedAlgorithms</li>
  * <li>FingerprintHash</li>
@@ -92,7 +99,7 @@ public class OpenSSHConfig implements ConfigRepository {
   public static OpenSSHConfig parse(String conf) throws IOException {
     try (Reader r = new StringReader(conf)) {
       try (BufferedReader br = new BufferedReader(r)) {
-        return new OpenSSHConfig(br);
+        return new OpenSSHConfig(br, userSshDirectory());
       }
     }
   }
@@ -104,47 +111,271 @@ public class OpenSSHConfig implements ConfigRepository {
    * @return an instanceof OpenSSHConfig
    */
   public static OpenSSHConfig parseFile(String file) throws IOException {
-    try (BufferedReader br =
-        Files.newBufferedReader(Paths.get(Util.checkTilde(file)), StandardCharsets.UTF_8)) {
-      return new OpenSSHConfig(br);
+    return parseFile(file, userSshDirectory());
+  }
+
+  static OpenSSHConfig parseFile(String file, Path includeBase) throws IOException {
+    Path path = Paths.get(Util.checkTilde(file));
+    try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+      Set<Path> activeFiles = new HashSet<>();
+      activeFiles.add(path.toRealPath());
+      return new OpenSSHConfig(br, includeBase, activeFiles);
     }
   }
 
-  OpenSSHConfig(BufferedReader br) throws IOException {
-    _parse(br);
+  private static Path userSshDirectory() {
+    return Paths.get(System.getProperty("user.home"), ".ssh");
   }
 
-  private final Hashtable<String, Vector<String[]>> config = new Hashtable<>();
-  private final Vector<String> hosts = new Vector<>();
+  OpenSSHConfig(BufferedReader br, Path includeBase) throws IOException {
+    this(br, includeBase, new HashSet<>());
+  }
 
-  private void _parse(BufferedReader br) throws IOException {
-    String host = "";
-    Vector<String[]> kv = new Vector<>();
-    String l = null;
+  private OpenSSHConfig(BufferedReader br, Path includeBase, Set<Path> activeFiles)
+      throws IOException {
+    Section global = new Section("");
+    sections.add(global);
+    parse(br, includeBase, activeFiles, 0, global);
+  }
 
-    while ((l = br.readLine()) != null) {
-      l = l.trim();
-      if (l.length() == 0 || l.startsWith("#"))
-        continue;
+  private static final class Section {
+    final String host;
+    final Vector<String[]> options = new Vector<>();
 
-      String[] key_value = l.split("[= \t]", 2);
-      for (int i = 0; i < key_value.length; i++)
-        key_value[i] = key_value[i].trim();
+    Section(String host) {
+      this.host = host;
+    }
+  }
 
-      if (key_value.length <= 1)
-        continue;
+  private final Vector<Section> sections = new Vector<>();
 
-      if (key_value[0].equalsIgnoreCase("Host")) {
-        config.put(host, kv);
-        hosts.addElement(host);
-        host = key_value[1];
-        kv = new Vector<>();
-      } else {
-        kv.addElement(key_value);
+  private void parse(BufferedReader br, Path includeBase, Set<Path> activeFiles, int depth,
+      Section current) throws IOException {
+    String line;
+    while ((line = br.readLine()) != null) {
+      current = parseLine(line, includeBase, activeFiles, depth, current);
+    }
+  }
+
+  private Section parseLine(String line, Path includeBase, Set<Path> activeFiles, int depth,
+      Section current) throws IOException {
+    line = line.trim();
+    if (line.isEmpty() || line.startsWith("#")) {
+      return current;
+    }
+    String[] keyValue = line.split("[= \t]", 2);
+    if (keyValue.length < 2) {
+      return current;
+    }
+    String key = keyValue[0].trim();
+    String value = keyValue[1].trim();
+    if (value.startsWith("=")) {
+      value = value.substring(1).trim();
+    }
+    if (key.equalsIgnoreCase("Host")) {
+      Section next = new Section(value);
+      sections.add(next);
+      return next;
+    }
+    if (key.equalsIgnoreCase("Include")) {
+      includeFiles(value, includeBase, activeFiles, depth, current);
+      Section next = new Section(current.host);
+      sections.add(next);
+      return next;
+    }
+    current.options.addElement(new String[] {key, value});
+    return current;
+  }
+
+  private void includeFiles(String value, Path includeBase, Set<Path> activeFiles, int depth,
+      Section current) throws IOException {
+    for (String pattern : includeArguments(value)) {
+      for (Path path : expandInclude(pattern, includeBase)) {
+        includeFile(path, includeBase, activeFiles, depth, current.host);
       }
     }
-    config.put(host, kv);
-    hosts.addElement(host);
+  }
+
+  private void includeFile(Path path, Path includeBase, Set<Path> activeFiles, int depth,
+      String host) throws IOException {
+    if (depth >= 16) {
+      throw new IOException("Too many recursive configuration includes: " + path);
+    }
+    Path realPath = path.toRealPath();
+    if (!activeFiles.add(realPath)) {
+      throw new IOException("Recursive configuration include: " + path);
+    }
+    try (BufferedReader included = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+      Section includedContext = new Section(host);
+      sections.add(includedContext);
+      parse(included, includeBase, activeFiles, depth + 1, includedContext);
+    } finally {
+      activeFiles.remove(realPath);
+    }
+  }
+
+  private static List<String> includeArguments(String value) throws IOException {
+    IncludeArgumentParser parser = new IncludeArgumentParser();
+    for (int i = 0; i < value.length(); i++) {
+      if (!parser.accept(value.charAt(i))) {
+        break;
+      }
+    }
+    return parser.finish(value);
+  }
+
+  private static final class IncludeArgumentParser {
+    private final List<String> paths = new ArrayList<>();
+    private final StringBuilder path = new StringBuilder();
+    private char quote;
+    private boolean escaped;
+
+    boolean accept(char ch) {
+      if (escaped) {
+        path.append(ch);
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (quote != 0) {
+        if (ch == quote) {
+          quote = 0;
+        } else {
+          path.append(ch);
+        }
+      } else if (ch == '"' || ch == '\'') {
+        quote = ch;
+      } else if (Character.isWhitespace(ch)) {
+        flush();
+      } else if (ch == '#' && path.length() == 0) {
+        return false;
+      } else {
+        path.append(ch);
+      }
+      return true;
+    }
+
+    List<String> finish(String value) throws IOException {
+      if (escaped || quote != 0) {
+        throw new IOException("Unterminated Include path: " + value);
+      }
+      flush();
+      if (paths.isEmpty()) {
+        throw new IOException("Include requires at least one path");
+      }
+      return paths;
+    }
+
+    private void flush() {
+      if (path.length() > 0) {
+        paths.add(path.toString());
+        path.setLength(0);
+      }
+    }
+  }
+
+  private static List<Path> expandInclude(String pattern, Path includeBase) throws IOException {
+    String name = expandIncludeTokens(pattern);
+    if (name.startsWith("~") && !name.equals("~") && !name.startsWith("~/")) {
+      throw new IOException("Unsupported Include home path: " + pattern);
+    }
+    if (name.equals("~") || name.startsWith("~/")) {
+      name = System.getProperty("user.home") + name.substring(1);
+    }
+    Path path = Paths.get(name);
+    if (!path.isAbsolute()) {
+      path = includeBase.resolve(path);
+    }
+    return matchIncludeFiles(path.toAbsolutePath().normalize(), pattern);
+  }
+
+  private static String expandIncludeTokens(String pattern) throws IOException {
+    StringBuilder expanded = new StringBuilder();
+    for (int i = 0; i < pattern.length(); i++) {
+      char ch = pattern.charAt(i);
+      if (ch == '%') {
+        if (++i == pattern.length()) {
+          throw new IOException("Incomplete Include token: " + pattern);
+        }
+        expanded.append(expandPercentToken(pattern.charAt(i), pattern));
+      } else if (ch == '$' && i + 1 < pattern.length() && pattern.charAt(i + 1) == '{') {
+        int end = pattern.indexOf('}', i + 2);
+        if (end < 0) {
+          throw new IOException("Incomplete Include environment variable: " + pattern);
+        }
+        String name = pattern.substring(i + 2, end);
+        expanded.append(expandEnvironmentVariable(name));
+        i = end;
+      } else {
+        expanded.append(ch);
+      }
+    }
+    return expanded.toString();
+  }
+
+  private static String expandPercentToken(char token, String pattern) throws IOException {
+    if (token == 'd') {
+      return System.getProperty("user.home");
+    }
+    if (token == '%') {
+      return "%";
+    }
+    throw new IOException("Unsupported Include token %" + token + " in " + pattern);
+  }
+
+  private static String expandEnvironmentVariable(String name) throws IOException {
+    String value = System.getenv(name);
+    if (value == null) {
+      throw new IOException("Undefined Include environment variable: " + name);
+    }
+    return value;
+  }
+
+  private static List<Path> matchIncludeFiles(Path path, String pattern) throws IOException {
+    Path prefix = literalPrefix(path);
+    if (prefix.equals(path)) {
+      return Files.exists(path) ? Collections.singletonList(path) : Collections.emptyList();
+    }
+    if (!Files.exists(prefix)) {
+      return Collections.emptyList();
+    }
+    PathMatcher matcher;
+    try {
+      matcher = path.getFileSystem().getPathMatcher("glob:" + path);
+    } catch (IllegalArgumentException e) {
+      throw new IOException("Invalid Include pattern: " + pattern, e);
+    }
+    try (Stream<Path> candidates = Files.walk(prefix)) {
+      return candidates.filter(matcher::matches).filter(Files::isRegularFile)
+          .sorted(Comparator.comparing(Path::toString)).collect(Collectors.toList());
+    }
+  }
+
+  private static Path literalPrefix(Path path) {
+    Path prefix = path.getRoot();
+    for (Path part : path) {
+      String segment = part.toString();
+      if (segment.indexOf('*') >= 0 || segment.indexOf('?') >= 0 || segment.indexOf('[') >= 0
+          || segment.indexOf('{') >= 0) {
+        break;
+      }
+      prefix = prefix.resolve(part);
+    }
+    return prefix;
+  }
+
+  private static boolean matchesHostPatterns(String patternList, byte[] host) {
+    boolean positive = false;
+    for (String pattern : patternList.split("[ \t]")) {
+      boolean negate = pattern.startsWith("!");
+      String candidate = negate ? pattern.substring(1) : pattern;
+      if (Util.glob(Util.str2byte(candidate.trim()), host)) {
+        if (negate) {
+          return false;
+        }
+        positive = true;
+      }
+    }
+    return positive;
   }
 
   @Override
@@ -185,33 +416,10 @@ public class OpenSSHConfig implements ConfigRepository {
     MyConfig(String host) {
       this.host = host;
 
-      _configs.addElement(config.get(""));
-
       byte[] _host = Util.str2byte(host);
-      if (hosts.size() > 1) {
-        for (int i = 1; i < hosts.size(); i++) {
-          boolean anyPositivePatternMatches = false;
-          boolean anyNegativePatternMatches = false;
-          String patterns[] = hosts.elementAt(i).split("[ \t]");
-          for (int j = 0; j < patterns.length; j++) {
-            boolean negate = false;
-            String foo = patterns[j].trim();
-            if (foo.startsWith("!")) {
-              negate = true;
-              foo = foo.substring(1).trim();
-            }
-            if (Util.glob(Util.str2byte(foo), _host)) {
-              if (negate) {
-                anyNegativePatternMatches = true;
-              } else {
-                anyPositivePatternMatches = true;
-              }
-            }
-          }
-
-          if (anyPositivePatternMatches && !anyNegativePatternMatches) {
-            _configs.addElement(config.get(hosts.elementAt(i)));
-          }
+      for (Section section : sections) {
+        if (section.host.isEmpty() || matchesHostPatterns(section.host, _host)) {
+          _configs.addElement(section.options);
         }
       }
     }

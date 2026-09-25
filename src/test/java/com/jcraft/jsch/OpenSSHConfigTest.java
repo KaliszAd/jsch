@@ -2,19 +2,27 @@ package com.jcraft.jsch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class OpenSSHConfigTest {
+
+  @TempDir
+  Path tempDir;
 
   Map<String, String> keyMap = OpenSSHConfig.getKeymap().entrySet().stream().collect(Collectors
       .toMap(entry -> entry.getValue().toUpperCase(Locale.ROOT), Map.Entry::getKey, (s, s2) -> s2));
@@ -29,6 +37,73 @@ class OpenSSHConfigTest {
     assertEquals("foobar", config.getUser());
     assertEquals("host2.somewhere.edu", config.getHostname());
     assertEquals("~/.ssh/old_keys/host2_key", config.getValue("IdentityFile"));
+  }
+
+  @Test
+  void includesGlobsInLexicalOrderAndRestoresHostScope() throws IOException {
+    Path sshDir = Files.createDirectory(tempDir.resolve("ssh"));
+    Path snippets = Files.createDirectory(sshDir.resolve("snippets"));
+    write(snippets.resolve("20.conf"), "Host target\n  User second\n");
+    write(snippets.resolve("10.conf"), "User first\nHost elsewhere\n  Port 2222\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Host target\n  Include snippets/*.conf\n  HostName after.example\n");
+
+    OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString(), sshDir);
+    assertEquals("first", config.getConfig("target").getUser());
+    assertEquals("after.example", config.getConfig("target").getHostname());
+    assertEquals(2222, config.getConfig("elsewhere").getPort());
+  }
+
+  @Test
+  void nestedIncludesAndQuotedPathsRetainFirstValue() throws IOException {
+    Path nested = tempDir.resolve("nested file.conf");
+    write(nested, "User nested\n");
+    Path middle = tempDir.resolve("middle.conf");
+    write(middle, "Include \"" + nested + "\"\nUser middle\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Host target\n Include " + middle + "\n User outer\n");
+
+    OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString());
+    assertEquals("nested", config.getConfig("target").getUser());
+  }
+
+  @Test
+  void includeAcceptsMultiplePathsOnOneLine() throws IOException {
+    Path first = tempDir.resolve("first.conf");
+    Path second = tempDir.resolve("second.conf");
+    write(first, "Host target\n User from-first\n");
+    write(second, "Host target\n Port 2200\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Include = " + first + " " + second + "\n");
+
+    OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString());
+    assertEquals("from-first", config.getConfig("target").getUser());
+    assertEquals(2200, config.getConfig("target").getPort());
+  }
+
+  @Test
+  void unsupportedIncludeTokenIsRejected() throws IOException {
+    Path main = tempDir.resolve("config");
+    write(main, "Include %h/something.conf\n");
+    assertThrows(IOException.class, () -> OpenSSHConfig.parseFile(main.toString()));
+  }
+
+  @Test
+  void repeatedHostBlocksDoNotOverwriteEachOther() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig
+        .parse("Host target\n User first\nHost target\n HostName destination\n User second\n");
+    assertEquals("first", config.getConfig("target").getUser());
+    assertEquals("destination", config.getConfig("target").getHostname());
+  }
+
+  @Test
+  void missingIncludeIsIgnoredAndCycleIsRejected() throws IOException {
+    Path main = tempDir.resolve("config");
+    write(main, "Include missing/*.conf\nHost target\n User someone\n");
+    assertEquals("someone", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
+
+    write(main, "Include " + main + "\n");
+    assertThrows(IOException.class, () -> OpenSSHConfig.parseFile(main.toString()));
   }
 
   @ParameterizedTest
@@ -116,5 +191,9 @@ class OpenSSHConfigTest {
     String actual = config.getUser();
     assertEquals(expected, actual, String.format(Locale.ROOT,
         "Expected user for host %s to be %s, but was %s", host, expected, actual));
+  }
+
+  private static void write(Path path, String value) throws IOException {
+    Files.write(path, value.getBytes(StandardCharsets.UTF_8));
   }
 }
