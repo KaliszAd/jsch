@@ -289,7 +289,7 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static List<Path> expandInclude(String pattern, Path includeBase) throws IOException {
-    String name = expandIncludeTokens(pattern);
+    String name = pattern;
     if (name.startsWith("~") && !name.equals("~") && !name.startsWith("~/")) {
       throw new IOException("Unsupported Include home path: " + pattern);
     }
@@ -301,48 +301,6 @@ public class OpenSSHConfig implements ConfigRepository {
       path = includeBase.resolve(path);
     }
     return matchIncludeFiles(path.toAbsolutePath().normalize(), pattern);
-  }
-
-  private static String expandIncludeTokens(String pattern) throws IOException {
-    StringBuilder expanded = new StringBuilder();
-    for (int i = 0; i < pattern.length(); i++) {
-      char ch = pattern.charAt(i);
-      if (ch == '%') {
-        if (++i == pattern.length()) {
-          throw new IOException("Incomplete Include token: " + pattern);
-        }
-        expanded.append(expandPercentToken(pattern.charAt(i), pattern));
-      } else if (ch == '$' && i + 1 < pattern.length() && pattern.charAt(i + 1) == '{') {
-        int end = pattern.indexOf('}', i + 2);
-        if (end < 0) {
-          throw new IOException("Incomplete Include environment variable: " + pattern);
-        }
-        String name = pattern.substring(i + 2, end);
-        expanded.append(expandEnvironmentVariable(name));
-        i = end;
-      } else {
-        expanded.append(ch);
-      }
-    }
-    return expanded.toString();
-  }
-
-  private static String expandPercentToken(char token, String pattern) throws IOException {
-    if (token == 'd') {
-      return System.getProperty("user.home");
-    }
-    if (token == '%') {
-      return "%";
-    }
-    throw new IOException("Unsupported Include token %" + token + " in " + pattern);
-  }
-
-  private static String expandEnvironmentVariable(String name) throws IOException {
-    String value = System.getenv(name);
-    if (value == null) {
-      throw new IOException("Undefined Include environment variable: " + name);
-    }
-    return value;
   }
 
   private static List<Path> matchIncludeFiles(Path path, String pattern) throws IOException {

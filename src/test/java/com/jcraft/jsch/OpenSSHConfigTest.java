@@ -79,18 +79,13 @@ class OpenSSHConfigTest {
   }
 
   @Test
-  void includeExpandsHomeToken() throws IOException {
+  void includeDoesNotExpandPercentTokens() throws IOException {
     Path main = tempDir.resolve("config");
-    Path included = tempDir.resolve("included.conf");
-    String originalHome = System.getProperty("user.home");
-    try {
-      System.setProperty("user.home", tempDir.toString());
-      write(included, "Host target\n User from-home\n");
-      write(main, "Include %d/" + included.getFileName() + "\n");
-      assertEquals("from-home", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
-    } finally {
-      System.setProperty("user.home", originalHome);
-    }
+    Path included = tempDir.resolve("%d.conf");
+    write(included, "Host target\n User from-literal\n");
+    write(main, "Include %d.conf\n");
+    assertEquals("from-literal",
+        OpenSSHConfig.parseFile(main.toString(), tempDir).getConfig("target").getUser());
   }
 
   @Test
@@ -133,10 +128,10 @@ class OpenSSHConfigTest {
   }
 
   @Test
-  void unsupportedIncludeTokenIsRejected() throws IOException {
+  void unresolvedIncludeTokenIsNotAnError() throws IOException {
     Path main = tempDir.resolve("config");
-    write(main, "Include %h/something.conf\n");
-    assertThrows(IOException.class, () -> OpenSSHConfig.parseFile(main.toString()));
+    write(main, "Include %h/something.conf\nHost target\n User someone\n");
+    assertEquals("someone", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
   }
 
   @Test
