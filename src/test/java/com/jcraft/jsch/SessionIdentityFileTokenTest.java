@@ -201,17 +201,44 @@ class SessionIdentityFileTokenTest {
     assertSame(replacement, bare.getIdentityRepository());
   }
 
+  /** A hash class whose loading fails with an Error rather than an Exception. */
+  public static final class ExplodingHash implements HASH {
+    static {
+      if (Boolean.parseBoolean("true")) {
+        throw new IllegalStateException("no hash for you");
+      }
+    }
+
+    @Override
+    public void init() {}
+
+    @Override
+    public int getBlockSize() {
+      return 0;
+    }
+
+    @Override
+    public void update(byte[] foo, int start, int len) {}
+
+    @Override
+    public byte[] digest() {
+      return new byte[0];
+    }
+  }
+
   @Test
   void connectionHashFailsClosedWhenTheConfiguredHashIsUnavailable() throws Exception {
     String sha1 = JSch.getConfig("sha-1");
-    JSch.setConfig("sha-1", "missing.Sha1");
     try {
-      JSch jsch = new JSch();
-      jsch.setConfigRepository(
-          OpenSSHConfig.parse("Host alias\n  UserKnownHostsFile " + tempDir.resolve("%C") + "\n"));
-      JSchException error =
-          assertThrows(JSchException.class, () -> jsch.getSession("user", "alias", 22));
-      assertTrue(error.getMessage().contains("%C"), error.getMessage());
+      for (String hashClass : new String[] {"missing.Sha1", ExplodingHash.class.getName()}) {
+        JSch.setConfig("sha-1", hashClass);
+        JSch jsch = new JSch();
+        jsch.setConfigRepository(OpenSSHConfig
+            .parse("Host alias\n  UserKnownHostsFile " + tempDir.resolve("%C") + "\n"));
+        JSchException error =
+            assertThrows(JSchException.class, () -> jsch.getSession("user", "alias", 22));
+        assertTrue(error.getMessage().contains("%C"), hashClass + ": " + error.getMessage());
+      }
     } finally {
       JSch.setConfig("sha-1", sha1);
     }

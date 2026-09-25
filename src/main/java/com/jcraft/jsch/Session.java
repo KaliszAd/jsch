@@ -3844,10 +3844,12 @@ public class Session {
         hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
       }
       return hex.toString();
-    } catch (Exception e) {
+    } catch (Exception | LinkageError e) {
       // The token then fails closed; say why, since the generic "unsupported token" would mislead.
-      getLogger().log(Logger.ERROR,
-          "Cannot compute config token %C with the configured sha-1 class: " + e);
+      if (getLogger().isEnabled(Logger.ERROR)) {
+        getLogger().log(Logger.ERROR,
+            "Cannot compute config token %C with the configured sha-1 class: " + e);
+      }
       return null;
     }
   }

@@ -442,7 +442,7 @@ class OpenSSHConfigTest {
     assertEquals(-1, OpenSSHConfig.parse("Match localnetwork 192.0.2.0/24\n  Port 14\n")
         .getConfig("alias").getPort());
     for (String list : new String[] {"127.0.0.1/8", "localhost", "!10.0.0.0/8", "10.0.0.0/33",
-        "fe80::1%eth0", ""}) {
+        "256.1.1.1/32", "10.0.0.0/+8", "10.0.0.0/ 8", "fe80::1%eth0", ""}) {
       assertThrows(IOException.class,
           () -> OpenSSHConfig.parse("Match localnetwork \"" + list + "\"\n  Port 1\n"), list);
     }

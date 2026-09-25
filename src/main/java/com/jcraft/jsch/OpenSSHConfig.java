@@ -186,7 +186,9 @@ public class OpenSSHConfig implements ConfigRepository {
           Collections.emptyList());
     } catch (IOException e) {
       // The message names the file and line, so an application that only logs still shows why.
-      JSch.getLogger().log(Logger.ERROR, "Cannot use OpenSSH config: " + e.getMessage());
+      if (JSch.getLogger().isEnabled(Logger.ERROR)) {
+        JSch.getLogger().log(Logger.ERROR, "Cannot use OpenSSH config: " + e.getMessage());
+      }
       throw e;
     }
   }
@@ -569,11 +571,9 @@ public class OpenSSHConfig implements ConfigRepository {
       }
       int bits = bytes.length * 8;
       if (slash >= 0) {
-        try {
-          bits = Integer.parseInt(entry.substring(slash + 1));
-        } catch (NumberFormatException e) {
-          bits = -1;
-        }
+        String length = entry.substring(slash + 1);
+        // Digits only: Integer.parseInt would also accept a sign.
+        bits = length.matches("\\d{1,3}") ? Integer.parseInt(length) : -1;
       }
       if (bits < 0 || bits > bytes.length * 8 || !hostBitsZero(bytes, bits)) {
         throw new IOException("Invalid Match localnetwork address list: " + list);
@@ -583,7 +583,8 @@ public class OpenSSHConfig implements ConfigRepository {
 
     /** Parses an IP literal without ever resolving a host name. */
     private static byte[] parseLiteral(String address) {
-      boolean ipv4 = address.matches("\\d{1,3}(\\.\\d{1,3}){3}");
+      String octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+      boolean ipv4 = address.matches(octet + "(\\." + octet + "){3}");
       boolean ipv6 = address.indexOf(':') >= 0 && address.matches("[0-9A-Fa-f:.]+");
       if (!ipv4 && !ipv6) {
         return new byte[0];
