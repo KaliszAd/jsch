@@ -132,6 +132,171 @@ class ProxyJumpTest {
     assertThrows(NullPointerException.class, () -> ProxyJump.through(null));
   }
 
+  /** A hop whose connect and disconnect only flip a flag, to test hop sharing without a server. */
+  static class StubHop extends Session {
+    boolean connected;
+    int connectTimeout = -1;
+    int disconnects;
+
+    StubHop(JSch jsch) throws JSchException {
+      super(jsch, "u", "hop", 22);
+    }
+
+    @Override
+    public void connect(int timeout) {
+      connected = true;
+      connectTimeout = timeout;
+    }
+
+    @Override
+    public boolean isConnected() {
+      return connected;
+    }
+
+    @Override
+    public void disconnect() {
+      connected = false;
+      disconnects++;
+    }
+  }
+
+  @Test
+  void sharedHopOpensOnFirstUseAndClosesAfterLastRelease() throws Exception {
+    JSch jsch = new JSch();
+    List<StubHop> created = new ArrayList<>();
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      StubHop hop = new StubHop(jsch);
+      created.add(hop);
+      return hop;
+    });
+    assertFalse(shared.isOpen());
+
+    Session first = shared.acquire(1000);
+    Session second = shared.acquire(1000);
+    assertSame(first, second);
+    assertEquals(1, created.size());
+    assertTrue(shared.isOpen());
+
+    shared.release(first);
+    assertTrue(shared.isOpen(), "one session still uses the hop");
+    assertEquals(0, created.get(0).disconnects);
+
+    shared.release(second);
+    assertFalse(shared.isOpen(), "the last session closes the hop");
+    assertEquals(1, created.get(0).disconnects);
+
+    Session third = shared.acquire(1000);
+    assertEquals(2, created.size(), "a later session opens a fresh hop");
+    assertSame(created.get(1), third);
+    shared.release(third);
+    assertFalse(shared.isOpen());
+    assertEquals(1, created.get(1).disconnects);
+  }
+
+  @Test
+  void sharedHopReplacesDeadHopAndIgnoresReleasesOfTheOldOne() throws Exception {
+    JSch jsch = new JSch();
+    List<StubHop> created = new ArrayList<>();
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      StubHop hop = new StubHop(jsch);
+      created.add(hop);
+      return hop;
+    });
+    Session old = shared.acquire(1000);
+    created.get(0).connected = false; // the hop died underneath its user
+
+    Session fresh = shared.acquire(1000);
+    assertEquals(2, created.size());
+    assertTrue(shared.isOpen());
+
+    shared.release(old);
+    assertTrue(shared.isOpen(), "the old user's release must not close the replacement");
+    shared.release(fresh);
+    assertFalse(shared.isOpen());
+    assertEquals(1, created.get(1).disconnects);
+  }
+
+  @Test
+  void sharedHopConnectsWithLargerOfSessionAndHopTimeouts() throws Exception {
+    JSch jsch = new JSch();
+    List<StubHop> created = new ArrayList<>();
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      StubHop hop = new StubHop(jsch);
+      hop.setTimeout(5000);
+      created.add(hop);
+      return hop;
+    });
+    shared.release(shared.acquire(1000));
+    assertEquals(5000, created.get(0).connectTimeout);
+    shared.release(shared.acquire(9000));
+    assertEquals(9000, created.get(1).connectTimeout);
+  }
+
+  @Test
+  void sharedHopCloseDisconnectsAtOnceAndFailedFactoryLeavesItClosed() throws Exception {
+    JSch jsch = new JSch();
+    List<StubHop> created = new ArrayList<>();
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      if (created.isEmpty()) {
+        created.add(new StubHop(jsch));
+        return created.get(0);
+      }
+      throw new JSchException("no more hops");
+    });
+    Session hop = shared.acquire(1000);
+    shared.close();
+    assertFalse(shared.isOpen());
+    assertEquals(1, created.get(0).disconnects);
+    shared.release(hop); // stale, ignored
+    assertEquals(1, created.get(0).disconnects);
+    assertThrows(JSchException.class, () -> shared.acquire(1000));
+    assertFalse(shared.isOpen());
+    assertThrows(NullPointerException.class, () -> ProxyJump.share(null));
+  }
+
+  @Test
+  void sharedHopIsOpenedOnceUnderConcurrentUse() throws Exception {
+    JSch jsch = new JSch();
+    List<StubHop> created = java.util.Collections.synchronizedList(new ArrayList<>());
+    ProxyJump.SharedHop shared = ProxyJump.share(() -> {
+      StubHop hop = new StubHop(jsch) {
+        @Override
+        public void connect(int timeout) {
+          try {
+            Thread.sleep(50); // widen the window in which others could open a second hop
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          super.connect(timeout);
+        }
+      };
+      created.add(hop);
+      return hop;
+    });
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(16);
+    try {
+      List<java.util.concurrent.Future<Session>> acquired = new ArrayList<>();
+      for (int i = 0; i < 16; i++) {
+        acquired.add(pool.submit(() -> shared.acquire(1000)));
+      }
+      List<java.util.concurrent.Future<?>> released = new ArrayList<>();
+      for (java.util.concurrent.Future<Session> f : acquired) {
+        Session hop = f.get();
+        assertSame(created.get(0), hop);
+        released.add(pool.submit(() -> shared.release(hop)));
+      }
+      for (java.util.concurrent.Future<?> f : released) {
+        f.get();
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    assertEquals(1, created.size());
+    assertEquals(1, created.get(0).disconnects);
+    assertFalse(shared.isOpen());
+  }
+
   private static int closedPort() throws java.io.IOException {
     try (ServerSocket closed = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
       return closed.getLocalPort();
