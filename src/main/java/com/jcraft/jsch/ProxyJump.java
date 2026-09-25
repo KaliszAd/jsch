@@ -232,7 +232,8 @@ public final class ProxyJump implements ReadTimeoutProxy {
       channel.setHost(host);
       channel.setPort(port);
       try {
-        in = new TimeoutInputStream(channel.getInputStream(), channel::isConnected);
+        in = new TimeoutInputStream(channel.getInputStream(),
+            () -> channel.isConnected() && !channel.isEOF());
         out = channel.getOutputStream();
         channel.connect(timeout);
         if (!channel.isConnected()) {
