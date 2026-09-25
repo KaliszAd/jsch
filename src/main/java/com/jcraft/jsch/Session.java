@@ -264,11 +264,7 @@ public class Session {
       }
 
       if (connectTimeout > 0) {
-        if (socket != null) {
-          socket.setSoTimeout(connectTimeout);
-        } else if (proxy instanceof ReadTimeoutProxy) {
-          ((ReadTimeoutProxy) proxy).setReadTimeout(connectTimeout);
-        }
+        setReadTimeout(connectTimeout);
       }
 
       isConnected = true;
@@ -540,12 +536,9 @@ public class Session {
             (auth_cancel ? "Auth cancel" : "Auth fail") + " for methods '" + smethods + "'");
       }
 
-      if (connectTimeout > 0 || timeout > 0) {
-        if (socket != null) {
-          socket.setSoTimeout(timeout);
-        } else if (proxy instanceof ReadTimeoutProxy) {
-          ((ReadTimeoutProxy) proxy).setReadTimeout(timeout);
-        }
+      // A ReadTimeoutProxy may have bounded the handshake itself, so always reset it.
+      if (connectTimeout > 0 || timeout > 0 || proxy instanceof ReadTimeoutProxy) {
+        setReadTimeout(timeout);
       }
 
       isAuthed = true;
@@ -3079,18 +3072,37 @@ public class Session {
     }
   }
 
+  private void setReadTimeout(int readTimeout) throws Exception {
+    if (socket != null) {
+      socket.setSoTimeout(readTimeout);
+    } else if (proxy instanceof ReadTimeoutProxy) {
+      ((ReadTimeoutProxy) proxy).setReadTimeout(readTimeout);
+    }
+  }
+
   void applyExplicitHostKeyPolicyTo(Session hop) {
     // Keep the hop's Host config, but carry explicit application-level host-key constraints.
+    // StrictHostKeyChecking is only carried when it is stricter, so it never weakens the hop.
     if (explicitHostKeyRepository != null) {
       hop.setHostKeyRepository(explicitHostKeyRepository);
     }
-    if (explicitStrictHostKeyChecking != null) {
+    if (explicitStrictHostKeyChecking != null
+        && hostKeyCheckingStrictness(explicitStrictHostKeyChecking) > hostKeyCheckingStrictness(
+            hop.getConfig("StrictHostKeyChecking"))) {
       hop.setConfig("StrictHostKeyChecking", explicitStrictHostKeyChecking);
     }
     if (explicitHostKeyAlgorithms != null) {
       hop.setConfig("server_host_key", explicitHostKeyAlgorithms);
     }
   }
+
+  private static int hostKeyCheckingStrictness(String value) {
+    if ("yes".equals(value)) {
+      return 2;
+    }
+    return "ask".equals(value) ? 1 : 0;
+  }
+
 
   public String getConfig(String key) {
     if (key.equals("PubkeyAcceptedKeyTypes")) {

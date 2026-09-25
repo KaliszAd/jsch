@@ -1,13 +1,14 @@
 package com.jcraft.jsch;
 
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -16,16 +17,32 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-/** Carries an SSH connection through one or more direct-tcpip channels. */
+/**
+ * Carries an SSH connection through one or more direct-tcpip channels, like OpenSSH's
+ * {@code ProxyJump} ({@code ssh -J}).
+ *
+ * <p>
+ * Each hop is a separate {@link Session} that uses its own {@code Host} configuration. Explicit
+ * host-key constraints set on the target session by the application (a host-key repository, a
+ * stricter {@code StrictHostKeyChecking}, or {@code server_host_key}) are also applied to the hops,
+ * but a hop's own {@code StrictHostKeyChecking} is never weakened.
+ *
+ * <p>
+ * The whole chain shares one connect deadline: the largest {@code ConnectTimeout} of the target and
+ * of every hop. Hops do not each get the full timeout.
+ */
 public final class ProxyJump implements ReadTimeoutProxy {
   private static final ThreadLocal<Set<String>> CONNECTING = ThreadLocal.withInitial(HashSet::new);
+  private static final int DEFAULT_PORT = 22;
+  private static final String URI_PREFIX = "ssh://";
+  // A tunnelled SSH session needs a wider window than port forwarding; OpenSSH uses 2 MiB.
+  private static final int CHANNEL_WINDOW_SIZE = 0x200000;
+  private static final int CHANNEL_PACKET_SIZE = 0x8000;
 
   private final Session target;
   private final List<Hop> hops;
   private final List<Session> sessions = new ArrayList<>();
-  private ChannelDirectTCPIP channel;
-  private TimeoutInputStream in;
-  private OutputStream out;
+  private ChannelProxy destination;
 
   public ProxyJump(Session target, String specification) throws JSchException {
     this.target = target;
@@ -34,16 +51,28 @@ public final class ProxyJump implements ReadTimeoutProxy {
 
   @Override
   public void connect(SocketFactory socketFactory, String host, int port, int timeout)
-      throws Exception {
+      throws JSchException {
     String key = target.org_host;
     Set<String> connecting = CONNECTING.get();
     if (!connecting.add(key)) {
       throw new JSchException("ProxyJump cycle involving " + key);
     }
     try {
-      Session previous = connectHops(socketFactory, timeout);
-      connectDestination(previous, socketFactory, host, port, timeout);
-    } catch (Exception e) {
+      Session previous = null;
+      for (Hop hop : hops) {
+        previous = createHop(hop, previous, socketFactory);
+        sessions.add(previous);
+      }
+      int budget = connectBudget(timeout, sessions);
+      long deadline = budget > 0 ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budget) : 0;
+      for (Session session : sessions) {
+        session.connect(remaining(deadline));
+      }
+      destination = new ChannelProxy(previous);
+      destination.connect(socketFactory, host, port, remaining(deadline));
+      // Bound each read of the target handshake; Session replaces this once it is authenticated.
+      destination.setReadTimeout(budget);
+    } catch (JSchException | RuntimeException e) {
       close();
       throw e;
     } finally {
@@ -54,21 +83,15 @@ public final class ProxyJump implements ReadTimeoutProxy {
     }
   }
 
-  private Session connectHops(SocketFactory socketFactory, int timeout) throws Exception {
-    Session previous = null;
-    for (Hop hop : hops) {
-      Session next = createHop(hop, previous, socketFactory);
-      sessions.add(next);
-      next.connect(timeout);
-      previous = next;
-    }
-    return previous;
-  }
-
-  Session createHop(Hop hop, Session previous, SocketFactory socketFactory)
-      throws JSchException {
-    Session next = target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? 22 : hop.port);
+  Session createHop(Hop hop, Session previous, SocketFactory socketFactory) throws JSchException {
+    Session next =
+        target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? DEFAULT_PORT : hop.port);
     target.applyExplicitHostKeyPolicyTo(next);
+    next.setDaemonThread(target.daemon_thread);
+    next.setThreadFactory(target.getThreadFactory());
+    if (target.getLogger() != target.jsch.getInstanceLogger()) {
+      next.setLogger(target.getLogger());
+    }
     if (hop.port != 0) {
       next.setPort(hop.port);
     }
@@ -80,23 +103,34 @@ public final class ProxyJump implements ReadTimeoutProxy {
     return next;
   }
 
-  private void connectDestination(Session previous, SocketFactory socketFactory, String host,
-      int port, int timeout) throws Exception {
-    ChannelProxy finalProxy = new ChannelProxy(previous);
-    finalProxy.connect(socketFactory, host, port, timeout);
-    channel = finalProxy.channel;
-    in = finalProxy.in;
-    out = finalProxy.out;
+  /** The largest connect timeout on the path, or 0 if none is set. */
+  static int connectBudget(int timeout, List<Session> chain) {
+    int budget = timeout;
+    for (Session session : chain) {
+      budget = Math.max(budget, session.getTimeout());
+    }
+    return budget;
+  }
+
+  private static int remaining(long deadline) throws JSchException {
+    if (deadline == 0) {
+      return 0;
+    }
+    long millis = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+    if (millis <= 0) {
+      throw new JSchException("ProxyJump connect timed out");
+    }
+    return (int) Math.min(millis, Integer.MAX_VALUE);
   }
 
   @Override
   public InputStream getInputStream() {
-    return in;
+    return destination == null ? null : destination.getInputStream();
   }
 
   @Override
   public OutputStream getOutputStream() {
-    return out;
+    return destination == null ? null : destination.getOutputStream();
   }
 
   @Override
@@ -109,23 +143,21 @@ public final class ProxyJump implements ReadTimeoutProxy {
     if (timeout < 0) {
       throw new JSchException("invalid timeout value");
     }
-    if (in != null) {
-      in.setTimeout(timeout);
+    if (destination != null) {
+      destination.setReadTimeout(timeout);
     }
   }
 
   @Override
   public void close() {
-    if (channel != null) {
-      channel.disconnect();
-      channel = null;
+    if (destination != null) {
+      destination.close();
+      destination = null;
     }
     for (int i = sessions.size() - 1; i >= 0; i--) {
       sessions.get(i).disconnect();
     }
     sessions.clear();
-    in = null;
-    out = null;
   }
 
   static List<Hop> parse(String specification) throws JSchException {
@@ -137,68 +169,139 @@ public final class ProxyJump implements ReadTimeoutProxy {
       try {
         result.add(parseHop(item));
       } catch (IllegalArgumentException e) {
-        throw new JSchException("Invalid ProxyJump host: " + item, e);
+        // The item is redacted and the cause dropped so a password-like value never leaks.
+        throw new JSchException(
+            "Invalid ProxyJump host: " + redact(item) + " (" + e.getMessage() + ")");
       }
     }
     return Collections.unmodifiableList(result);
   }
 
-  private static Hop parseHop(String item) {
-    if (item.isEmpty() || !item.equals(item.trim()) || item.indexOf(' ') >= 0) {
-      throw new IllegalArgumentException();
+  /** Hides everything after a ':' in the user part, which may be a password. */
+  static String redact(String item) {
+    int start = item.startsWith(URI_PREFIX) ? URI_PREFIX.length() : 0;
+    int at = item.lastIndexOf('@');
+    int colon = item.indexOf(':', start);
+    if (at < start || colon < 0 || colon > at) {
+      return item;
     }
-    Hop hop = item.startsWith("ssh://") ? parseUriHop(item) : parseHostHop(item);
-    if (hop.host.isEmpty() || (hop.user != null && hop.user.isEmpty())) {
-      throw new IllegalArgumentException();
-    }
-    return hop;
+    return item.substring(0, colon) + ":***" + item.substring(at);
   }
 
-  private static Hop parseUriHop(String item) {
-    URI uri = URI.create(item);
-    if (!"ssh".equals(uri.getScheme()) || uri.getHost() == null
-        || (uri.getRawPath() != null && !uri.getRawPath().isEmpty()) || uri.getRawQuery() != null
-        || uri.getRawFragment() != null) {
-      throw new IllegalArgumentException();
+  private static Hop parseHop(String item) {
+    if (item.isEmpty()) {
+      throw new IllegalArgumentException("empty host");
     }
-    String host = uri.getHost();
-    if (host.startsWith("[") && host.endsWith("]")) {
-      host = host.substring(1, host.length() - 1);
+    for (int i = 0; i < item.length(); i++) {
+      if (Character.isWhitespace(item.charAt(i))) {
+        throw new IllegalArgumentException("whitespace");
+      }
     }
-    int port = uri.getPort();
-    if (port == 0 || port > 65535) {
-      throw new IllegalArgumentException();
+    return item.startsWith(URI_PREFIX) ? parseUriHop(item.substring(URI_PREFIX.length()))
+        : parseHostHop(item);
+  }
+
+  /** Parses the part after {@code ssh://}, following OpenSSH's parse_uri(). */
+  private static Hop parseUriHop(String rest) {
+    int slash = rest.indexOf('/');
+    if (slash >= 0 && slash != rest.length() - 1) {
+      throw new IllegalArgumentException("URI path is not allowed");
     }
-    return new Hop(uri.getUserInfo(), host, Math.max(port, 0));
+    String authority = slash >= 0 ? rest.substring(0, slash) : rest;
+    if (authority.indexOf('?') >= 0 || authority.indexOf('#') >= 0) {
+      throw new IllegalArgumentException("URI query or fragment is not allowed");
+    }
+    int at = authority.lastIndexOf('@');
+    String user = null;
+    if (at >= 0) {
+      String userinfo = authority.substring(0, at);
+      int params = userinfo.indexOf(';');
+      if (params >= 0) {
+        // OpenSSH ignores connection parameters such as ";fingerprint=..."
+        userinfo = userinfo.substring(0, params);
+      }
+      if (userinfo.indexOf(':') >= 0) {
+        throw new IllegalArgumentException("passwords are not supported");
+      }
+      user = percentDecode(userinfo);
+    }
+    return parseAddress(user, authority.substring(at + 1));
   }
 
   private static Hop parseHostHop(String item) {
     int at = item.lastIndexOf('@');
-    String user = at < 0 ? null : item.substring(0, at);
-    String address = item.substring(at + 1);
+    return parseAddress(at < 0 ? null : item.substring(0, at), item.substring(at + 1));
+  }
+
+  private static Hop parseAddress(String user, String address) {
+    if (user != null && user.isEmpty()) {
+      throw new IllegalArgumentException("empty user");
+    }
+    String host;
+    String port = null;
     if (address.startsWith("[")) {
       int end = address.indexOf(']');
       if (end < 0 || (end + 1 < address.length() && address.charAt(end + 1) != ':')) {
-        throw new IllegalArgumentException();
+        throw new IllegalArgumentException("malformed IPv6 address");
       }
-      int port = end + 1 < address.length() ? parsePort(address.substring(end + 2)) : 0;
-      return new Hop(user, address.substring(1, end), port);
+      host = address.substring(1, end);
+      if (end + 1 < address.length()) {
+        port = address.substring(end + 2);
+      }
+    } else {
+      int colon = address.indexOf(':');
+      if (colon != address.lastIndexOf(':')) {
+        throw new IllegalArgumentException("IPv6 addresses need brackets");
+      }
+      host = colon < 0 ? address : address.substring(0, colon);
+      if (colon >= 0) {
+        port = address.substring(colon + 1);
+      }
     }
-    int colon = address.indexOf(':');
-    if (colon != address.lastIndexOf(':')) {
-      throw new IllegalArgumentException();
+    if (host.isEmpty()) {
+      throw new IllegalArgumentException("empty host");
     }
-    String host = colon < 0 ? address : address.substring(0, colon);
-    int port = colon < 0 ? 0 : parsePort(address.substring(colon + 1));
-    return new Hop(user, host, port);
+    return new Hop(user, host, port == null ? 0 : parsePort(port));
   }
 
   private static int parsePort(String value) {
-    int port = Integer.parseInt(value);
+    int port;
+    try {
+      port = Integer.parseInt(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException("bad port");
+    }
     if (port < 1 || port > 65535) {
-      throw new IllegalArgumentException();
+      throw new IllegalArgumentException("bad port");
     }
     return port;
+  }
+
+  private static String percentDecode(String value) {
+    if (value.indexOf('%') < 0) {
+      return value;
+    }
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    int i = 0;
+    while (i < value.length()) {
+      int percent = value.indexOf('%', i);
+      if (percent < 0) {
+        percent = value.length();
+      }
+      byte[] literal = value.substring(i, percent).getBytes(StandardCharsets.UTF_8);
+      bytes.write(literal, 0, literal.length);
+      if (percent == value.length()) {
+        break;
+      }
+      int hi = percent + 2 < value.length() ? Character.digit(value.charAt(percent + 1), 16) : -1;
+      int lo = percent + 2 < value.length() ? Character.digit(value.charAt(percent + 2), 16) : -1;
+      if (hi < 0 || lo < 0) {
+        throw new IllegalArgumentException("bad percent encoding");
+      }
+      bytes.write((hi << 4) | lo);
+      i = percent + 3;
+    }
+    return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
   }
 
   static final class Hop {
@@ -225,22 +328,26 @@ public final class ProxyJump implements ReadTimeoutProxy {
 
     @Override
     public void connect(SocketFactory socketFactory, String host, int port, int timeout)
-        throws Exception {
-      channel = (ChannelDirectTCPIP) previous.openChannel("direct-tcpip");
-      if (channel == null) {
-        throw new JSchException("Unable to open ProxyJump channel");
-      }
-      channel.setHost(host);
-      channel.setPort(port);
+        throws JSchException {
+      ChannelDirectTCPIP opened = (ChannelDirectTCPIP) previous.openChannel("direct-tcpip");
+      channel = opened;
+      opened.setLocalWindowSizeMax(CHANNEL_WINDOW_SIZE);
+      opened.setLocalWindowSize(CHANNEL_WINDOW_SIZE);
+      opened.setLocalPacketSize(CHANNEL_PACKET_SIZE);
+      opened.setHost(host);
+      opened.setPort(port);
       try {
-        in = new TimeoutInputStream(channel.getInputStream(),
-            () -> channel.isConnected() && !channel.isEOF());
-        out = channel.getOutputStream();
-        channel.connect(timeout);
-        if (!channel.isConnected()) {
+        in = new TimeoutInputStream(opened.getInputStream(),
+            () -> opened.isConnected() && !opened.isEOF());
+        out = opened.getOutputStream();
+        opened.connect(timeout);
+        if (!opened.isConnected()) {
           throw new JSchException("Unable to connect ProxyJump channel to " + host);
         }
-      } catch (Exception e) {
+      } catch (IOException e) {
+        close();
+        throw new JSchException(e.toString(), e);
+      } catch (JSchException | RuntimeException e) {
         close();
         throw e;
       }
@@ -282,14 +389,25 @@ public final class ProxyJump implements ReadTimeoutProxy {
     }
   }
 
+  /**
+   * Adds a read timeout to a channel's piped stream, which has none of its own.
+   *
+   * <p>
+   * Waits on the pipe's monitor, which the writer notifies on flush. After consuming data it
+   * notifies a writer waiting for space: {@link java.io.PipedInputStream} only does so when a read
+   * finds the pipe empty, so without it the writer sleeps for up to a second per full pipe.
+   */
   static final class TimeoutInputStream extends FilterInputStream {
-    private final BooleanSupplier connected;
+    // Bounds a wait whose notification was missed.
+    private static final long MAX_WAIT_MILLIS = 100;
+
+    private final BooleanSupplier open;
     private final byte[] singleByte = new byte[1];
     private volatile int timeout;
 
-    TimeoutInputStream(InputStream in, BooleanSupplier connected) {
+    TimeoutInputStream(InputStream in, BooleanSupplier open) {
       super(in);
-      this.connected = connected;
+      this.open = open;
     }
 
     void setTimeout(int timeout) {
@@ -304,34 +422,40 @@ public final class ProxyJump implements ReadTimeoutProxy {
 
     @Override
     public int read(byte[] bytes, int offset, int length) throws IOException {
-      if (length == 0) {
-        return 0;
-      }
       if (offset < 0 || length < 0 || offset > bytes.length - length) {
         throw new IndexOutOfBoundsException();
+      }
+      if (length == 0) {
+        return 0;
       }
       int readTimeout = timeout;
       if (readTimeout == 0) {
         return in.read(bytes, offset, length);
       }
       long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readTimeout);
-      while (true) {
-        int available = in.available();
-        if (available > 0) {
-          return in.read(bytes, offset, Math.min(length, available));
-        }
-        if (!connected.getAsBoolean()) {
-          return -1;
-        }
-        long remaining = deadline - System.nanoTime();
-        if (remaining <= 0) {
-          throw new SocketTimeoutException("ProxyJump read timed out");
-        }
-        try {
-          TimeUnit.NANOSECONDS.sleep(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(10)));
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new InterruptedIOException("ProxyJump read interrupted");
+      // Holding the pipe's monitor keeps the writer from adding data between the checks below, so
+      // an empty pipe on a closed channel really is the end of the stream.
+      synchronized (in) {
+        while (true) {
+          int available = in.available();
+          if (available > 0) {
+            int count = in.read(bytes, offset, Math.min(length, available));
+            in.notifyAll();
+            return count;
+          }
+          if (!open.getAsBoolean()) {
+            return -1;
+          }
+          long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+          if (remaining <= 0) {
+            throw new SocketTimeoutException("ProxyJump read timed out");
+          }
+          try {
+            in.wait(Math.min(remaining, MAX_WAIT_MILLIS));
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("ProxyJump read interrupted");
+          }
         }
       }
     }
