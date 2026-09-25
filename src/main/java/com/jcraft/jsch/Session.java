@@ -3658,8 +3658,10 @@ public class Session {
     }
 
     value = config.getHostname();
-    if (value != null)
-      host = value;
+    if (value != null) {
+      host = ConfigTokenExpander.expandTokens(value,
+          token -> token == 'h' ? org_host : null);
+    }
 
     int port = config.getPort();
     if (port != -1)
@@ -3699,39 +3701,28 @@ public class Session {
 
     value = config.getValue("UserKnownHostsFile");
     if (value != null) {
-      KnownHosts kh = new KnownHosts(jsch);
-      kh.setKnownHosts(value);
-      this.setHostKeyRepository(kh);
+      String path = ConfigTokenExpander.expandPath(value, this::resolveConfigToken);
+      if (path != null) {
+        KnownHosts kh = new KnownHosts(jsch);
+        kh.setKnownHosts(path);
+        this.setHostKeyRepository(kh);
+      }
     }
 
     String[] values = config.getValues("IdentityFile");
     if (values != null) {
-      String[] global = configRepository.getConfig("").getValues("IdentityFile");
-      if (global != null) {
-        for (int i = 0; i < global.length; i++) {
-          jsch.addIdentity(global[i]);
+      IdentityRepositoryWrapper ir =
+          new IdentityRepositoryWrapper(jsch.getIdentityRepository(), true);
+      for (String valuePath : values) {
+        if ("none".equalsIgnoreCase(valuePath)) {
+          continue;
         }
-      } else {
-        global = new String[0];
-      }
-      if (values.length - global.length > 0) {
-        IdentityRepositoryWrapper ir =
-            new IdentityRepositoryWrapper(jsch.getIdentityRepository(), true);
-        for (int i = 0; i < values.length; i++) {
-          String ifile = values[i];
-          for (int j = 0; j < global.length; j++) {
-            if (!ifile.equals(global[j]))
-              continue;
-            ifile = null;
-            break;
-          }
-          if (ifile == null)
-            continue;
-          Identity identity = IdentityFile.newInstance(ifile, null, jsch.instLogger);
-          ir.add(identity);
+        String ifile = ConfigTokenExpander.expandPath(valuePath, this::resolveConfigToken);
+        if (ifile != null) {
+          ir.add(IdentityFile.newInstance(ifile, null, jsch.instLogger));
         }
-        this.setIdentityRepository(ir);
       }
+      this.setIdentityRepository(ir);
     }
 
     value = config.getValue("ServerAliveInterval");
@@ -3758,6 +3749,27 @@ public class Session {
     value = config.getValue("ClearAllForwardings");
     if (value != null) {
       setConfig("ClearAllForwardings", value);
+    }
+  }
+
+  String resolveConfigToken(char token) {
+    switch (token) {
+      case 'd':
+        return System.getProperty("user.home");
+      case 'h':
+        return host;
+      case 'n':
+        return org_host;
+      case 'p':
+        return Integer.toString(port);
+      case 'r':
+        return username != null ? username : System.getProperty("user.name");
+      case 'u':
+        return System.getProperty("user.name");
+      case 'k':
+        return hostKeyAlias != null ? hostKeyAlias : host;
+      default:
+        return null;
     }
   }
 
