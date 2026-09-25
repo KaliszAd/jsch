@@ -57,42 +57,58 @@ final class ConfigTokenExpander {
   private static String expand(String path, Function<Character, String> tokens, boolean environment,
       boolean lenient) throws JSchException {
     StringBuilder expanded = new StringBuilder();
-    for (int i = 0; i < path.length(); i++) {
+    int i = 0;
+    while (i < path.length()) {
       char ch = path.charAt(i);
       if (ch == '%') {
-        if (i + 1 == path.length()) {
-          if (lenient) {
-            expanded.append(ch);
-            continue;
-          }
-          throw new JSchException("Incomplete config path token: " + path);
-        }
-        char token = path.charAt(++i);
-        String value = token == '%' ? "%" : tokens.apply(token);
-        if (value == null) {
-          if (lenient) {
-            expanded.append(ch).append(token);
-            continue;
-          }
-          throw new JSchException("Unsupported config path token %" + token);
-        }
-        expanded.append(value);
-      } else if (environment && ch == '$' && i + 1 < path.length() && path.charAt(i + 1) == '{') {
-        int end = path.indexOf('}', i + 2);
-        if (end < 0) {
-          throw new JSchException("Incomplete config path environment variable: " + path);
-        }
-        String name = path.substring(i + 2, end);
-        String value = Util.getSystemEnv(name);
-        if (value == null) {
-          throw new JSchException("Undefined config path environment variable: " + name);
-        }
-        expanded.append(value);
-        i = end;
+        i = appendToken(path, i, tokens, lenient, expanded);
+      } else if (environment && path.startsWith("${", i)) {
+        i = appendEnvironment(path, i, expanded);
       } else {
         expanded.append(ch);
+        i++;
       }
     }
     return expanded.toString();
+  }
+
+  /** Appends the value of the token starting at {@code percent}; returns the index after it. */
+  private static int appendToken(String path, int percent, Function<Character, String> tokens,
+      boolean lenient, StringBuilder expanded) throws JSchException {
+    if (percent + 1 == path.length()) {
+      if (!lenient) {
+        throw new JSchException("Incomplete config path token: " + path);
+      }
+      expanded.append('%');
+      return percent + 1;
+    }
+    char token = path.charAt(percent + 1);
+    String value = token == '%' ? "%" : tokens.apply(token);
+    if (value != null) {
+      expanded.append(value);
+    } else if (lenient) {
+      expanded.append('%').append(token);
+    } else {
+      throw new JSchException("Unsupported config path token %" + token);
+    }
+    return percent + 2;
+  }
+
+  /**
+   * Appends the variable starting at {@code start} ({@code ${NAME}}); returns the index after it.
+   */
+  private static int appendEnvironment(String path, int start, StringBuilder expanded)
+      throws JSchException {
+    int end = path.indexOf('}', start + 2);
+    if (end < 0) {
+      throw new JSchException("Incomplete config path environment variable: " + path);
+    }
+    String name = path.substring(start + 2, end);
+    String value = Util.getSystemEnv(name);
+    if (value == null) {
+      throw new JSchException("Undefined config path environment variable: " + name);
+    }
+    expanded.append(value);
+    return end + 1;
   }
 }

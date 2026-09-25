@@ -200,4 +200,20 @@ class SessionIdentityFileTokenTest {
     Session bare = jsch.getSession("bare");
     assertSame(replacement, bare.getIdentityRepository());
   }
+
+  @Test
+  void connectionHashFailsClosedWhenTheConfiguredHashIsUnavailable() throws Exception {
+    String sha1 = JSch.getConfig("sha-1");
+    JSch.setConfig("sha-1", "missing.Sha1");
+    try {
+      JSch jsch = new JSch();
+      jsch.setConfigRepository(
+          OpenSSHConfig.parse("Host alias\n  UserKnownHostsFile " + tempDir.resolve("%C") + "\n"));
+      JSchException error =
+          assertThrows(JSchException.class, () -> jsch.getSession("user", "alias", 22));
+      assertTrue(error.getMessage().contains("%C"), error.getMessage());
+    } finally {
+      JSch.setConfig("sha-1", sha1);
+    }
+  }
 }

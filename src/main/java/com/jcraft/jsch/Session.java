@@ -149,6 +149,7 @@ public class Session {
   SocketFactory socket_factory = null;
 
   private Hashtable<String, String> config = null;
+  private static final String USER_NAME_PROPERTY = "user.name";
   private ConfigRepository.Config resolvedConfig;
   private List<Identity> configIdentities;
   private List<Identity> trailingConfigIdentities;
@@ -200,7 +201,7 @@ public class Session {
     applyConfig();
 
     if (this.username == null) {
-      this.username = Util.getSystemProperty("user.name");
+      this.username = Util.getSystemProperty(USER_NAME_PROPERTY);
     }
 
     if (this.username == null) {
@@ -3663,69 +3664,70 @@ public class Session {
       return;
     }
 
-    ConfigRepository.Config config = configRepository.getConfig(org_host, username);
-    resolvedConfig = config;
+    ConfigRepository.Config hostConfig = configRepository.getConfig(org_host, username);
+    resolvedConfig = hostConfig;
 
     String value = null;
 
     if (username == null) {
-      value = config.getUser();
+      value = hostConfig.getUser();
       if (value != null)
         username = value;
     }
 
-    value = config.getHostname();
+    value = hostConfig.getHostname();
     if (value != null) {
-      host = expandsTokens(config)
-          ? ConfigTokenExpander.expandTokens(value, token -> token == 'h' ? org_host : null)
-          : value;
+      host = value;
+      if (expandsTokens(hostConfig)) {
+        host = ConfigTokenExpander.expandTokens(value, token -> token == 'h' ? org_host : null);
+      }
     }
 
-    int port = config.getPort();
+    int port = hostConfig.getPort();
     if (port != -1)
       this.port = port;
 
-    checkConfig(config, "kex");
-    checkConfig(config, "server_host_key");
-    checkConfig(config, "prefer_known_host_key_types");
-    checkConfig(config, "enable_server_sig_algs");
-    checkConfig(config, "enable_ext_info_in_auth");
-    checkConfig(config, "enable_strict_kex");
-    checkConfig(config, "require_strict_kex");
-    checkConfig(config, "enable_pubkey_auth_query");
-    checkConfig(config, "try_additional_pubkey_algorithms");
-    checkConfig(config, "enable_auth_none");
-    checkConfig(config, "use_sftp_write_flush_workaround");
+    checkConfig(hostConfig, "kex");
+    checkConfig(hostConfig, "server_host_key");
+    checkConfig(hostConfig, "prefer_known_host_key_types");
+    checkConfig(hostConfig, "enable_server_sig_algs");
+    checkConfig(hostConfig, "enable_ext_info_in_auth");
+    checkConfig(hostConfig, "enable_strict_kex");
+    checkConfig(hostConfig, "require_strict_kex");
+    checkConfig(hostConfig, "enable_pubkey_auth_query");
+    checkConfig(hostConfig, "try_additional_pubkey_algorithms");
+    checkConfig(hostConfig, "enable_auth_none");
+    checkConfig(hostConfig, "use_sftp_write_flush_workaround");
 
-    checkConfig(config, "cipher.c2s");
-    checkConfig(config, "cipher.s2c");
-    checkConfig(config, "mac.c2s");
-    checkConfig(config, "mac.s2c");
-    checkConfig(config, "compression.c2s");
-    checkConfig(config, "compression.s2c");
-    checkConfig(config, "compression_level");
+    checkConfig(hostConfig, "cipher.c2s");
+    checkConfig(hostConfig, "cipher.s2c");
+    checkConfig(hostConfig, "mac.c2s");
+    checkConfig(hostConfig, "mac.s2c");
+    checkConfig(hostConfig, "compression.c2s");
+    checkConfig(hostConfig, "compression.s2c");
+    checkConfig(hostConfig, "compression_level");
 
-    checkConfig(config, "StrictHostKeyChecking");
-    checkConfig(config, "HashKnownHosts");
-    checkConfig(config, "PreferredAuthentications");
-    checkConfig(config, "PubkeyAcceptedAlgorithms");
-    checkConfig(config, "FingerprintHash");
-    checkConfig(config, "MaxAuthTries");
-    checkConfig(config, "ClearAllForwardings");
+    checkConfig(hostConfig, "StrictHostKeyChecking");
+    checkConfig(hostConfig, "HashKnownHosts");
+    checkConfig(hostConfig, "PreferredAuthentications");
+    checkConfig(hostConfig, "PubkeyAcceptedAlgorithms");
+    checkConfig(hostConfig, "FingerprintHash");
+    checkConfig(hostConfig, "MaxAuthTries");
+    checkConfig(hostConfig, "ClearAllForwardings");
 
-    value = config.getValue("HostKeyAlias");
+    value = hostConfig.getValue("HostKeyAlias");
     if (value != null)
       this.setHostKeyAlias(value);
 
-    value = config.getValue("UserKnownHostsFile");
+    value = hostConfig.getValue("UserKnownHostsFile");
     if (value != null) {
-      String path = expandConfigPath(config, value);
+      String path = expandConfigPath(hostConfig, value);
       KnownHosts kh = new KnownHosts(jsch);
       kh.setKnownHosts(path);
       this.setHostKeyRepository(kh);
     }
 
-    String[] values = config.getValues("IdentityFile");
+    String[] values = hostConfig.getValues("IdentityFile");
     if (values != null && values.length > 0) {
       // Identities from sections every host matches (like Host *) come after the ones set
       // programmatically, as before; host-specific ones come first.
@@ -3736,8 +3738,8 @@ public class Session {
         if ("none".equalsIgnoreCase(valuePath)) {
           continue;
         }
-        Identity identity =
-            IdentityFile.newInstance(expandConfigPath(config, valuePath), null, jsch.instLogger);
+        Identity identity = IdentityFile.newInstance(expandConfigPath(hostConfig, valuePath), null,
+            jsch.instLogger);
         (global.contains(valuePath) ? trailing : specific).add(identity);
       }
       if (!specific.isEmpty() || !trailing.isEmpty()) {
@@ -3746,7 +3748,7 @@ public class Session {
       }
     }
 
-    value = config.getValue("ServerAliveInterval");
+    value = hostConfig.getValue("ServerAliveInterval");
     if (value != null) {
       try {
         this.setServerAliveInterval(Integer.parseInt(value));
@@ -3754,7 +3756,7 @@ public class Session {
       }
     }
 
-    value = config.getValue("ConnectTimeout");
+    value = hostConfig.getValue("ConnectTimeout");
     if (value != null) {
       try {
         setTimeout(Integer.parseInt(value));
@@ -3762,12 +3764,12 @@ public class Session {
       }
     }
 
-    value = config.getValue("MaxAuthTries");
+    value = hostConfig.getValue("MaxAuthTries");
     if (value != null) {
       setConfig("MaxAuthTries", value);
     }
 
-    value = config.getValue("ClearAllForwardings");
+    value = hostConfig.getValue("ClearAllForwardings");
     if (value != null) {
       setConfig("ClearAllForwardings", value);
     }
@@ -3809,9 +3811,9 @@ public class Session {
       case 'p':
         return Integer.toString(port);
       case 'r':
-        return username != null ? username : Util.getSystemProperty("user.name");
+        return username != null ? username : Util.getSystemProperty(USER_NAME_PROPERTY);
       case 'u':
-        return Util.getSystemProperty("user.name");
+        return Util.getSystemProperty(USER_NAME_PROPERTY);
       default:
         return null;
     }
@@ -3826,33 +3828,40 @@ public class Session {
     StringBuilder input = new StringBuilder(local).append(host).append(port)
         .append(resolveConfigToken('r')).append(resolveConfigToken('j'));
     try {
-      byte[] digest = java.security.MessageDigest.getInstance("SHA-1")
-          .digest(input.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      // OpenSSH defines %C as the SHA-1 of this string; it only names files, it protects nothing.
+      HASH sha1 = Class.forName(getConfig("sha-1")).asSubclass(HASH.class).getDeclaredConstructor()
+          .newInstance();
+      sha1.init();
+      byte[] bytes = Util.str2byte(input.toString());
+      sha1.update(bytes, 0, bytes.length);
       StringBuilder hex = new StringBuilder();
-      for (byte b : digest) {
+      for (byte b : sha1.digest()) {
         hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
       }
       return hex.toString();
-    } catch (java.security.NoSuchAlgorithmException e) {
+    } catch (Exception e) {
+      // The token then fails closed; say why, since the generic "unsupported token" would mislead.
+      getLogger().log(Logger.ERROR,
+          "Cannot compute config token %C with the configured sha-1 class: " + e);
       return null;
     }
   }
 
-  void applyConfigChannel(ChannelSession channel) throws JSchException {
+  void applyConfigChannel(ChannelSession channel) {
     if (resolvedConfig == null) {
       return;
     }
 
-    ConfigRepository.Config config = resolvedConfig;
+    ConfigRepository.Config hostConfig = resolvedConfig;
 
     String value = null;
 
-    value = config.getValue("ForwardAgent");
+    value = hostConfig.getValue("ForwardAgent");
     if (value != null) {
       channel.setAgentForwarding(value.equals("yes"));
     }
 
-    value = config.getValue("RequestTTY");
+    value = hostConfig.getValue("RequestTTY");
     if (value != null) {
       channel.setPty(value.equals("yes"));
     }
@@ -3867,16 +3876,16 @@ public class Session {
       return;
     }
 
-    ConfigRepository.Config config = resolvedConfig;
+    ConfigRepository.Config hostConfig = resolvedConfig;
 
-    String[] values = config.getValues("LocalForward");
+    String[] values = hostConfig.getValues("LocalForward");
     if (values != null) {
       for (int i = 0; i < values.length; i++) {
         setPortForwardingL(values[i]);
       }
     }
 
-    values = config.getValues("RemoteForward");
+    values = hostConfig.getValues("RemoteForward");
     if (values != null) {
       for (int i = 0; i < values.length; i++) {
         setPortForwardingR(values[i]);

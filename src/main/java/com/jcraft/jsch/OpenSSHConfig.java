@@ -182,7 +182,7 @@ public class OpenSSHConfig implements ConfigRepository {
     Section global = new Section("", null, Collections.emptyList(), Collections.emptyList());
     sections.add(global);
     try {
-      parse(br, source, includeBase, activeFiles, 0, global, Collections.emptyList(),
+      parse(br, new Frame(source, includeBase, activeFiles, 0), global, Collections.emptyList(),
           Collections.emptyList());
     } catch (IOException e) {
       // The message names the file and line, so an application that only logs still shows why.
@@ -208,30 +208,47 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static final int MAX_INCLUDE_DEPTH = 16; // as OpenSSH's READCONF_MAX_DEPTH
+  private static final String INCLUDE = "Include";
 
   private final Vector<Section> sections = new Vector<>();
   // OpenSSH re-reads the config once more when it has a non-negated "Match final".
   private boolean wantFinalPass;
 
-  private void parse(BufferedReader br, String source, Path includeBase, Set<Path> activeFiles,
-      int depth, Section current, List<String> enclosingHosts,
+  /** One file being parsed: where it came from, and what its Include lines are allowed to do. */
+  private static final class Frame {
+    final String source;
+    final Path includeBase;
+    final Set<Path> activeFiles;
+    final int depth;
+
+    Frame(String source, Path includeBase, Set<Path> activeFiles, int depth) {
+      this.source = source;
+      this.includeBase = includeBase;
+      this.activeFiles = activeFiles;
+      this.depth = depth;
+    }
+
+    Frame include(Path path) {
+      return new Frame(path.toString(), includeBase, activeFiles, depth + 1);
+    }
+  }
+
+  private void parse(BufferedReader br, Frame frame, Section current, List<String> enclosingHosts,
       List<MatchExpression> enclosingMatches) throws IOException {
     String line;
     int lineNumber = 0;
     while ((line = br.readLine()) != null) {
       lineNumber++;
       try {
-        current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts,
-            enclosingMatches);
+        current = parseLine(line, frame, current, enclosingHosts, enclosingMatches);
       } catch (IOException e) {
-        throw new IOException(source + ":" + lineNumber + ": " + e.getMessage(), e);
+        throw new IOException(frame.source + ":" + lineNumber + ": " + e.getMessage(), e);
       }
     }
   }
 
-  private Section parseLine(String line, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current, List<String> enclosingHosts, List<MatchExpression> enclosingMatches)
-      throws IOException {
+  private Section parseLine(String line, Frame frame, Section current, List<String> enclosingHosts,
+      List<MatchExpression> enclosingMatches) throws IOException {
     line = line.trim();
     if (line.isEmpty() || line.startsWith("#")) {
       return current;
@@ -239,7 +256,7 @@ public class OpenSSHConfig implements ConfigRepository {
     String[] keyValue = line.split("[= \t]", 2);
     if (keyValue.length < 2) {
       if (line.equalsIgnoreCase("Host") || line.equalsIgnoreCase("Match")
-          || line.equalsIgnoreCase("Include")) {
+          || line.equalsIgnoreCase(INCLUDE)) {
         throw new IOException(line + " requires an argument");
       }
       return current;
@@ -268,8 +285,8 @@ public class OpenSSHConfig implements ConfigRepository {
     if (value.isEmpty() && !key.equalsIgnoreCase("Include")) {
       return current;
     }
-    if (key.equalsIgnoreCase("Include")) {
-      includeFiles(value, includeBase, activeFiles, depth, current);
+    if (key.equalsIgnoreCase(INCLUDE)) {
+      includeFiles(value, frame, current);
       Section next = new Section(current.host, current.match, enclosingHosts, enclosingMatches);
       sections.add(next);
       return next;
@@ -281,10 +298,12 @@ public class OpenSSHConfig implements ConfigRepository {
   /** Drops a comment: an unquoted '#' starting a word, as in OpenSSH's argv_split(). */
   private static String stripComment(String value) {
     char quote = 0;
-    for (int i = 0; i < value.length(); i++) {
+    int i = 0;
+    while (i < value.length()) {
       char ch = value.charAt(i);
+      int step = 1;
       if (ch == '\\' && i + 1 < value.length() && isEscapable(value.charAt(i + 1), quote)) {
-        i++;
+        step = 2;
       } else if (quote != 0) {
         if (ch == quote) {
           quote = 0;
@@ -294,6 +313,7 @@ public class OpenSSHConfig implements ConfigRepository {
       } else if (ch == '#' && (i == 0 || Character.isWhitespace(value.charAt(i - 1)))) {
         return value.substring(0, i).trim();
       }
+      i += step;
     }
     return value;
   }
@@ -302,8 +322,7 @@ public class OpenSSHConfig implements ConfigRepository {
     return next == '\\' || next == '"' || next == '\'' || (quote == 0 && next == ' ');
   }
 
-  private void includeFiles(String value, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current) throws IOException {
+  private void includeFiles(String value, Frame frame, Section current) throws IOException {
     List<String> enclosingHosts = new ArrayList<>(current.enclosingHosts);
     List<MatchExpression> enclosingMatches = new ArrayList<>(current.enclosingMatches);
     if (!current.host.isEmpty()) {
@@ -313,28 +332,27 @@ public class OpenSSHConfig implements ConfigRepository {
       enclosingMatches.add(current.match);
     }
     for (String pattern : includeArguments(value)) {
-      for (Path path : expandInclude(pattern, includeBase)) {
-        includeFile(path, includeBase, activeFiles, depth, enclosingHosts, enclosingMatches);
+      for (Path path : expandInclude(pattern, frame.includeBase)) {
+        includeFile(path, frame, enclosingHosts, enclosingMatches);
       }
     }
   }
 
-  private void includeFile(Path path, Path includeBase, Set<Path> activeFiles, int depth,
-      List<String> enclosingHosts, List<MatchExpression> enclosingMatches) throws IOException {
-    if (depth >= MAX_INCLUDE_DEPTH) {
+  private void includeFile(Path path, Frame frame, List<String> enclosingHosts,
+      List<MatchExpression> enclosingMatches) throws IOException {
+    if (frame.depth >= MAX_INCLUDE_DEPTH) {
       throw new IOException("Too many recursive configuration includes: " + path);
     }
     Path realPath = path.toRealPath();
-    if (!activeFiles.add(realPath)) {
+    if (!frame.activeFiles.add(realPath)) {
       throw new IOException("Recursive configuration include: " + path);
     }
     try (BufferedReader included = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
       Section includedContext = new Section("", null, enclosingHosts, enclosingMatches);
       sections.add(includedContext);
-      parse(included, path.toString(), includeBase, activeFiles, depth + 1, includedContext,
-          enclosingHosts, enclosingMatches);
+      parse(included, frame.include(path), includedContext, enclosingHosts, enclosingMatches);
     } finally {
-      activeFiles.remove(realPath);
+      frame.activeFiles.remove(realPath);
     }
   }
 
@@ -358,35 +376,29 @@ public class OpenSSHConfig implements ConfigRepository {
     }
     List<String> arguments = arguments(value, "Match requires at least one criterion");
     List<MatchCriterion> criteria = new ArrayList<>();
-    for (int i = 0; i < arguments.size(); i++) {
-      String attribute = arguments.get(i);
+    int next = 0;
+    while (next < arguments.size()) {
+      String attribute = arguments.get(next++);
       boolean negated = attribute.startsWith("!");
       if (negated) {
         attribute = attribute.substring(1);
       }
       int equals = attribute.indexOf('=');
-      String pattern = equals < 0 ? null : attribute.substring(equals + 1);
       String type =
           (equals < 0 ? attribute : attribute.substring(0, equals)).toLowerCase(Locale.ROOT);
+      String pattern = equals < 0 ? null : attribute.substring(equals + 1);
       if (MatchCriterion.WITHOUT_ARGUMENT.contains(type)) {
-        if (type.equals("all") && (i != arguments.size() - 1 || !onlyPassCriteria(criteria))) {
+        if (type.equals("all") && (next != arguments.size() || !onlyPassCriteria(criteria))) {
           throw new IOException("Match all cannot be combined with other criteria");
         }
         criteria.add(new MatchCriterion(type, null, negated));
         continue;
       }
-      if (MatchCriterion.UNSUPPORTED.contains(type)) {
-        throw new IOException("Unsupported Match criterion: " + type
-            + (type.equals("exec") ? " (JSch never runs commands from ssh config)"
-                : " (not known when JSch reads the config)"));
+      rejectUnsupported(type);
+      if (pattern == null && next < arguments.size()) {
+        pattern = arguments.get(next++);
       }
-      if (!MatchCriterion.WITH_ARGUMENT.contains(type)) {
-        throw new IOException("Unsupported Match criterion: " + type);
-      }
-      if (pattern == null && ++i < arguments.size()) {
-        pattern = arguments.get(i);
-      }
-      if (pattern == null || (pattern.isEmpty() && !type.equals("tagged"))) {
+      if (pattern == null || (pattern.isEmpty() && !type.equals(MatchCriterion.TAGGED))) {
         throw new IOException("Missing Match pattern for " + type);
       }
       criteria.add(new MatchCriterion(type, pattern, negated));
@@ -394,9 +406,21 @@ public class OpenSSHConfig implements ConfigRepository {
     return new MatchExpression(criteria);
   }
 
+  private static void rejectUnsupported(String type) throws IOException {
+    if (MatchCriterion.UNSUPPORTED.contains(type)) {
+      throw new IOException("Unsupported Match criterion: " + type
+          + (type.equals("exec") ? " (JSch never runs commands from ssh config)"
+              : " (not known when JSch reads the config)"));
+    }
+    if (!MatchCriterion.WITH_ARGUMENT.contains(type)) {
+      throw new IOException("Unsupported Match criterion: " + type);
+    }
+  }
+
   private static boolean onlyPassCriteria(List<MatchCriterion> criteria) {
     for (MatchCriterion criterion : criteria) {
-      if (!criterion.type.equals("canonical") && !criterion.type.equals("final")) {
+      if (!criterion.type.equals(MatchCriterion.CANONICAL)
+          && !criterion.type.equals(MatchCriterion.FINAL)) {
         return false;
       }
     }
@@ -418,10 +442,14 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static final class MatchCriterion {
+    static final String TAGGED = "tagged";
+    static final String FINAL = "final";
+    static final String CANONICAL = "canonical";
+    static final String LOCALNETWORK = "localnetwork";
     static final Set<String> WITHOUT_ARGUMENT =
-        new HashSet<>(Arrays.asList("all", "canonical", "final"));
+        new HashSet<>(Arrays.asList("all", MatchCriterion.CANONICAL, MatchCriterion.FINAL));
     static final Set<String> WITH_ARGUMENT = new HashSet<>(Arrays.asList("host", "originalhost",
-        "user", "localuser", "tagged", "version", "localnetwork"));
+        "user", "localuser", MatchCriterion.TAGGED, "version", MatchCriterion.LOCALNETWORK));
     static final Set<String> UNSUPPORTED =
         new HashSet<>(Arrays.asList("exec", "command", "sessiontype"));
 
@@ -434,8 +462,8 @@ public class OpenSSHConfig implements ConfigRepository {
       this.type = type;
       this.pattern = pattern;
       this.negated = negated;
-      this.networks =
-          type.equals("localnetwork") ? LocalNetwork.parseList(pattern) : Collections.emptyList();
+      this.networks = type.equals(MatchCriterion.LOCALNETWORK) ? LocalNetwork.parseList(pattern)
+          : Collections.emptyList();
     }
 
     boolean matches(MatchContext context) {
@@ -446,11 +474,11 @@ public class OpenSSHConfig implements ConfigRepository {
       switch (type) {
         case "all":
           return true;
-        case "canonical":
-        case "final":
+        case CANONICAL:
+        case FINAL:
           // JSch does not canonicalize, so both hold exactly in the final pass.
           return context.finalPass;
-        case "localnetwork":
+        case LOCALNETWORK:
           return LocalNetwork.matchesInterface(networks);
         default:
           String candidate = candidate(context);
@@ -473,7 +501,7 @@ public class OpenSSHConfig implements ConfigRepository {
           return context.remoteUser;
         case "localuser":
           return Util.getSystemProperty("user.name");
-        case "tagged":
+        case TAGGED:
           return context.tag == null ? "" : context.tag;
         case "version":
           return "JSCH_" + JSch.VERSION;
@@ -491,7 +519,7 @@ public class OpenSSHConfig implements ConfigRepository {
       this.criteria = criteria;
       boolean finalPass = false;
       for (MatchCriterion criterion : criteria) {
-        finalPass |= criterion.type.equals("final") && !criterion.negated;
+        finalPass |= criterion.type.equals(MatchCriterion.FINAL) && !criterion.negated;
       }
       this.requestsFinalPass = finalPass;
     }
@@ -528,7 +556,7 @@ public class OpenSSHConfig implements ConfigRepository {
       int slash = entry.indexOf('/');
       String address = slash < 0 ? entry : entry.substring(0, slash);
       byte[] bytes = parseLiteral(address);
-      if (bytes == null) {
+      if (bytes.length == 0) {
         throw new IOException("Invalid Match localnetwork address list: " + list);
       }
       int bits = bytes.length * 8;
@@ -547,21 +575,21 @@ public class OpenSSHConfig implements ConfigRepository {
 
     /** Parses an IP literal without ever resolving a host name. */
     private static byte[] parseLiteral(String address) {
-      boolean ipv4 = address.matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}");
+      boolean ipv4 = address.matches("\\d{1,3}(\\.\\d{1,3}){3}");
       boolean ipv6 = address.indexOf(':') >= 0 && address.matches("[0-9A-Fa-f:.]+");
       if (!ipv4 && !ipv6) {
-        return null;
+        return new byte[0];
       }
       try {
         return InetAddress.getByName(address).getAddress();
       } catch (UnknownHostException e) {
-        return null;
+        return new byte[0];
       }
     }
 
     private static boolean hostBitsZero(byte[] address, int bits) {
       for (int i = 0; i < address.length * 8; i++) {
-        if (i >= bits && (address[i / 8] & (0x80 >>> (i % 8))) != 0) {
+        if (i >= bits && ((address[i / 8] & 0xff) & (0x80 >>> (i % 8))) != 0) {
           return false;
         }
       }
@@ -574,7 +602,7 @@ public class OpenSSHConfig implements ConfigRepository {
       }
       for (int i = 0; i < bits; i++) {
         int mask = 0x80 >>> (i % 8);
-        if ((address[i / 8] & mask) != (network[i / 8] & mask)) {
+        if (((address[i / 8] & 0xff) & mask) != ((network[i / 8] & 0xff) & mask)) {
           return false;
         }
       }
@@ -873,7 +901,7 @@ public class OpenSSHConfig implements ConfigRepository {
         applied.add(section.options);
         _configs.addElement(section.options);
         for (String[] option : section.options) {
-          record(option, context, obtained);
+          remember(option, context, obtained);
         }
       }
     }
@@ -895,7 +923,7 @@ public class OpenSSHConfig implements ConfigRepository {
     }
 
     /** Tracks the first HostName, User and Tag, which later Match lines evaluate. */
-    private void record(String[] option, MatchContext context, Set<String> obtained) {
+    private void remember(String[] option, MatchContext context, Set<String> obtained) {
       String key = option[0].toUpperCase(Locale.ROOT);
       if (!obtained.add(key)) {
         return;
