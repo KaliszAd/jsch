@@ -389,31 +389,33 @@ public final class ProxyJump implements ReadTimeoutProxy {
     if (user != null && user.isEmpty()) {
       throw new IllegalArgumentException("empty user");
     }
-    String host;
-    String port = null;
-    if (address.startsWith("[")) {
-      int end = address.indexOf(']');
-      if (end < 0 || (end + 1 < address.length() && address.charAt(end + 1) != ':')) {
-        throw new IllegalArgumentException("malformed IPv6 address");
-      }
-      host = address.substring(1, end);
-      if (end + 1 < address.length()) {
-        port = address.substring(end + 2);
-      }
-    } else {
-      int colon = address.indexOf(':');
-      if (colon != address.lastIndexOf(':')) {
-        throw new IllegalArgumentException("IPv6 addresses need brackets");
-      }
-      host = colon < 0 ? address : address.substring(0, colon);
-      if (colon >= 0) {
-        port = address.substring(colon + 1);
-      }
-    }
-    if (host.isEmpty()) {
+    String[] hostAndPort = address.startsWith("[") ? splitBracketed(address) : splitPlain(address);
+    if (hostAndPort[0].isEmpty()) {
       throw new IllegalArgumentException("empty host");
     }
-    return new Hop(user, host, port == null ? 0 : parsePort(port));
+    return new Hop(user, hostAndPort[0], hostAndPort[1] == null ? 0 : parsePort(hostAndPort[1]));
+  }
+
+  /** Splits {@code [host]} or {@code [host]:port}; the port is null when absent. */
+  private static String[] splitBracketed(String address) {
+    int end = address.indexOf(']');
+    if (end < 0 || (end + 1 < address.length() && address.charAt(end + 1) != ':')) {
+      throw new IllegalArgumentException("malformed IPv6 address");
+    }
+    String port = end + 1 < address.length() ? address.substring(end + 2) : null;
+    return new String[] {address.substring(1, end), port};
+  }
+
+  /** Splits {@code host} or {@code host:port}; the port is null when absent. */
+  private static String[] splitPlain(String address) {
+    int colon = address.indexOf(':');
+    if (colon != address.lastIndexOf(':')) {
+      throw new IllegalArgumentException("IPv6 addresses need brackets");
+    }
+    if (colon < 0) {
+      return new String[] {address, null};
+    }
+    return new String[] {address.substring(0, colon), address.substring(colon + 1)};
   }
 
   private static int parsePort(String value) {
@@ -573,22 +575,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
     private int count; // bytes waiting to be read
     private boolean closed; // no more data will flow, in either direction
     private volatile int timeout;
-    private final OutputStream sink = new OutputStream() {
-      @Override
-      public void write(int b) throws IOException {
-        put(new byte[] {(byte) b}, 0, 1);
-      }
-
-      @Override
-      public void write(byte[] b, int off, int len) throws IOException {
-        put(b, off, len);
-      }
-
-      @Override
-      public void close() {
-        TunnelBuffer.this.close();
-      }
-    };
+    private final OutputStream sink = new Sink();
 
     TunnelBuffer(int initialSize, int limit) {
       this.ring = new byte[initialSize];
@@ -637,7 +624,11 @@ public final class ProxyJump implements ReadTimeoutProxy {
             throw new SocketTimeoutException("ProxyJump read timed out");
           }
         }
-        await(left);
+        try {
+          wait(left);
+        } catch (InterruptedException e) {
+          throw interrupted();
+        }
       }
       int n = Math.min(length, count);
       int first = Math.min(n, ring.length - head);
@@ -656,45 +647,61 @@ public final class ProxyJump implements ReadTimeoutProxy {
       notifyAll();
     }
 
-    private synchronized void put(byte[] bytes, int offset, int length) throws IOException {
-      while (length > 0) {
-        while (!closed && count == ring.length && !grow()) {
-          await(0);
-        }
-        if (closed) {
-          throw new IOException("ProxyJump tunnel closed");
-        }
-        int n = Math.min(length, ring.length - count);
-        int tail = (head + count) % ring.length;
-        int first = Math.min(n, ring.length - tail);
-        System.arraycopy(bytes, offset, ring, tail, first);
-        System.arraycopy(bytes, offset + first, ring, 0, n - first);
-        count += n;
-        offset += n;
-        length -= n;
-        notifyAll();
-      }
+    private static InterruptedIOException interrupted() {
+      Thread.currentThread().interrupt();
+      return new InterruptedIOException("ProxyJump tunnel interrupted");
     }
 
-    private boolean grow() {
-      if (ring.length >= limit) {
-        return false;
+    /** The channel's side: blocks while the buffer is full, fails once it is closed. */
+    private final class Sink extends OutputStream {
+      @Override
+      public void write(int b) throws IOException {
+        write(new byte[] {(byte) b}, 0, 1);
       }
-      byte[] bigger = new byte[(int) Math.min(2L * ring.length, limit)];
-      int first = Math.min(count, ring.length - head);
-      System.arraycopy(ring, head, bigger, 0, first);
-      System.arraycopy(ring, 0, bigger, first, count - first);
-      ring = bigger;
-      head = 0;
-      return true;
-    }
 
-    private void await(long millis) throws InterruptedIOException {
-      try {
-        wait(millis);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new InterruptedIOException("ProxyJump tunnel interrupted");
+      @Override
+      public void write(byte[] bytes, int offset, int length) throws IOException {
+        synchronized (TunnelBuffer.this) {
+          while (length > 0) {
+            while (!closed && count == ring.length && !grow()) {
+              try {
+                TunnelBuffer.this.wait();
+              } catch (InterruptedException e) {
+                throw interrupted();
+              }
+            }
+            if (closed) {
+              throw new IOException("ProxyJump tunnel closed");
+            }
+            int n = Math.min(length, ring.length - count);
+            int tail = (head + count) % ring.length;
+            int first = Math.min(n, ring.length - tail);
+            System.arraycopy(bytes, offset, ring, tail, first);
+            System.arraycopy(bytes, offset + first, ring, 0, n - first);
+            count += n;
+            offset += n;
+            length -= n;
+            TunnelBuffer.this.notifyAll();
+          }
+        }
+      }
+
+      @Override
+      public void close() {
+        TunnelBuffer.this.close();
+      }
+
+      private boolean grow() {
+        if (ring.length >= limit) {
+          return false;
+        }
+        byte[] bigger = new byte[(int) Math.min(2L * ring.length, limit)];
+        int first = Math.min(count, ring.length - head);
+        System.arraycopy(ring, head, bigger, 0, first);
+        System.arraycopy(ring, 0, bigger, first, count - first);
+        ring = bigger;
+        head = 0;
+        return true;
       }
     }
   }

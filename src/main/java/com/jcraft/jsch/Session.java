@@ -31,6 +31,7 @@ import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
@@ -149,6 +150,8 @@ public class Session {
   SocketFactory socket_factory = null;
 
   private Hashtable<String, String> config = null;
+  private static final String STRICT_HOST_KEY_CHECKING = "StrictHostKeyChecking";
+  private static final String SERVER_HOST_KEY = "server_host_key";
   private boolean constructionComplete;
   private String explicitStrictHostKeyChecking;
   private String explicitHostKeyAlgorithms;
@@ -796,7 +799,7 @@ public class Session {
       kex += ",kex-strict-c-v00@openssh.com";
     }
 
-    String server_host_key = getConfig("server_host_key");
+    String server_host_key = getConfig(SERVER_HOST_KEY);
     String[] not_available_shks = checkSignatures(getConfig("CheckSignatures"));
     // Cache for UserAuthPublicKey
     this.not_available_shks = not_available_shks;
@@ -1028,7 +1031,7 @@ public class Session {
   private void doCheckHostKey(String chost, String key_type, String key_fprint,
       String keyAlgorithmName, byte[] K_S) throws JSchException {
 
-    String shkc = getConfig("StrictHostKeyChecking");
+    String shkc = getConfig(STRICT_HOST_KEY_CHECKING);
     // System.err.println("shkc: "+shkc);
 
     HostKeyRepository hkr = getHostKeyRepository();
@@ -3065,14 +3068,14 @@ public class Session {
     if (!constructionComplete) {
       return;
     }
-    if (key.equals("StrictHostKeyChecking")) {
+    if (key.equals(STRICT_HOST_KEY_CHECKING)) {
       explicitStrictHostKeyChecking = value;
-    } else if (key.equals("server_host_key")) {
+    } else if (key.equals(SERVER_HOST_KEY)) {
       explicitHostKeyAlgorithms = value;
     }
   }
 
-  private void setReadTimeout(int readTimeout) throws Exception {
+  private void setReadTimeout(int readTimeout) throws SocketException, JSchException {
     if (socket != null) {
       socket.setSoTimeout(readTimeout);
     } else if (proxy instanceof ReadTimeoutProxy) {
@@ -3088,11 +3091,11 @@ public class Session {
     }
     if (explicitStrictHostKeyChecking != null
         && hostKeyCheckingStrictness(explicitStrictHostKeyChecking) > hostKeyCheckingStrictness(
-            hop.getConfig("StrictHostKeyChecking"))) {
-      hop.setConfig("StrictHostKeyChecking", explicitStrictHostKeyChecking);
+            hop.getConfig(STRICT_HOST_KEY_CHECKING))) {
+      hop.setConfig(STRICT_HOST_KEY_CHECKING, explicitStrictHostKeyChecking);
     }
     if (explicitHostKeyAlgorithms != null) {
-      hop.setConfig("server_host_key", explicitHostKeyAlgorithms);
+      hop.setConfig(SERVER_HOST_KEY, explicitHostKeyAlgorithms);
     }
   }
 
@@ -3726,7 +3729,7 @@ public class Session {
       this.proxy = new ProxyJump(this, value);
 
     checkConfig(config, "kex");
-    checkConfig(config, "server_host_key");
+    checkConfig(config, SERVER_HOST_KEY);
     checkConfig(config, "prefer_known_host_key_types");
     checkConfig(config, "enable_server_sig_algs");
     checkConfig(config, "enable_ext_info_in_auth");
@@ -3745,7 +3748,7 @@ public class Session {
     checkConfig(config, "compression.s2c");
     checkConfig(config, "compression_level");
 
-    checkConfig(config, "StrictHostKeyChecking");
+    checkConfig(config, STRICT_HOST_KEY_CHECKING);
     checkConfig(config, "HashKnownHosts");
     checkConfig(config, "PreferredAuthentications");
     checkConfig(config, "PubkeyAcceptedAlgorithms");

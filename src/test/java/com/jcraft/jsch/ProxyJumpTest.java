@@ -104,7 +104,8 @@ class ProxyJumpTest {
     JSch jsch = new JSch();
     jsch.setConfigRepository(OpenSSHConfig.parse(String.join("\n", "Host a", "  User u",
         "  ProxyJump b", "Host b", "  User u", "  ProxyJump a", "")));
-    JSchException error = assertThrows(JSchException.class, () -> jsch.getSession("a").connect());
+    Session session = jsch.getSession("a");
+    JSchException error = assertThrows(JSchException.class, session::connect);
     assertEquals("ProxyJump cycle: b -> a -> b", error.getMessage());
   }
 
@@ -259,12 +260,14 @@ class ProxyJumpTest {
   void sharedHopIsOpenedOnceUnderConcurrentUse() throws Exception {
     JSch jsch = new JSch();
     List<StubHop> created = java.util.Collections.synchronizedList(new ArrayList<>());
+    // The first connect waits until every thread has been started, so all of them race for the hop.
+    java.util.concurrent.CountDownLatch allStarted = new java.util.concurrent.CountDownLatch(1);
     ProxyJump.SharedHop shared = ProxyJump.share(() -> {
       StubHop hop = new StubHop(jsch) {
         @Override
         public void connect(int timeout) {
           try {
-            Thread.sleep(50); // widen the window in which others could open a second hop
+            allStarted.await();
           } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
           }
@@ -281,6 +284,7 @@ class ProxyJumpTest {
       for (int i = 0; i < 16; i++) {
         acquired.add(pool.submit(() -> shared.acquire(1000)));
       }
+      allStarted.countDown();
       // All users hold the hop before any lets go; a release racing a queued acquire could
       // legitimately close and reopen it, which is the documented behaviour, not a defect.
       List<Session> hops = new ArrayList<>();
@@ -451,7 +455,9 @@ class ProxyJumpTest {
       }
 
       @Override
-      public void showMessage(String message) {}
+      public void showMessage(String message) {
+        // nothing to show
+      }
     };
     target.setUserInfo(prompts);
     target.setPassword("target-only".getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -527,7 +533,7 @@ class ProxyJumpTest {
   }
 
   @Test
-  void tunnelWrapsGrowsAndNeverStallsWriter() throws Exception {
+  void tunnelWrapsGrowsAndNeverStallsWriter() {
     byte[] data = new byte[256 * 1024];
     new java.util.Random(1).nextBytes(data);
     ProxyJump.TunnelBuffer tunnel = new ProxyJump.TunnelBuffer(1024, 4096);
@@ -568,7 +574,7 @@ class ProxyJumpTest {
     writer.start();
     assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
       while (writer.getState() != Thread.State.WAITING) {
-        Thread.sleep(5);
+        Thread.yield();
       }
       tunnel.close();
       writer.join();
