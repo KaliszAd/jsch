@@ -150,6 +150,8 @@ public class Session {
 
   private Hashtable<String, String> config = null;
   private ConfigRepository.Config resolvedConfig;
+  private List<Identity> configIdentities;
+  private List<Identity> trailingConfigIdentities;
 
   private Proxy proxy = null;
   private UserInfo userinfo;
@@ -3600,9 +3602,22 @@ public class Session {
    * @see JSch#getIdentityRepository()
    */
   IdentityRepository getIdentityRepository() {
-    if (identityRepository == null)
+    if (identityRepository != null) {
+      return identityRepository;
+    }
+    if (configIdentities == null) {
       return jsch.getIdentityRepository();
-    return identityRepository;
+    }
+    // Bind late, so the session follows a repository set on JSch after getSession().
+    IdentityRepositoryWrapper wrapper =
+        new IdentityRepositoryWrapper(jsch.getIdentityRepository(), true);
+    for (Identity identity : configIdentities) {
+      wrapper.add(identity);
+    }
+    for (Identity identity : trailingConfigIdentities) {
+      wrapper.addTrailing(identity);
+    }
+    return wrapper;
   }
 
   /**
@@ -3661,8 +3676,9 @@ public class Session {
 
     value = config.getHostname();
     if (value != null) {
-      host = ConfigTokenExpander.expandTokens(value,
-          token -> token == 'h' ? org_host : null);
+      host = expandsTokens(config)
+          ? ConfigTokenExpander.expandTokens(value, token -> token == 'h' ? org_host : null)
+          : value;
     }
 
     int port = config.getPort();
@@ -3703,24 +3719,31 @@ public class Session {
 
     value = config.getValue("UserKnownHostsFile");
     if (value != null) {
-      String path = ConfigTokenExpander.expandPath(value, this::resolveConfigToken);
+      String path = expandConfigPath(config, value);
       KnownHosts kh = new KnownHosts(jsch);
       kh.setKnownHosts(path);
       this.setHostKeyRepository(kh);
     }
 
     String[] values = config.getValues("IdentityFile");
-    if (values != null) {
-      IdentityRepositoryWrapper ir =
-          new IdentityRepositoryWrapper(jsch.getIdentityRepository(), true);
+    if (values != null && values.length > 0) {
+      // Identities from sections every host matches (like Host *) come after the ones set
+      // programmatically, as before; host-specific ones come first.
+      List<String> global = Arrays.asList(configRepository.getConfig("").getValues("IdentityFile"));
+      List<Identity> specific = new ArrayList<>();
+      List<Identity> trailing = new ArrayList<>();
       for (String valuePath : values) {
         if ("none".equalsIgnoreCase(valuePath)) {
           continue;
         }
-        String ifile = ConfigTokenExpander.expandPath(valuePath, this::resolveConfigToken);
-        ir.add(IdentityFile.newInstance(ifile, null, jsch.instLogger));
+        Identity identity =
+            IdentityFile.newInstance(expandConfigPath(config, valuePath), null, jsch.instLogger);
+        (global.contains(valuePath) ? trailing : specific).add(identity);
       }
-      this.setIdentityRepository(ir);
+      if (!specific.isEmpty() || !trailing.isEmpty()) {
+        configIdentities = specific;
+        trailingConfigIdentities = trailing;
+      }
     }
 
     value = config.getValue("ServerAliveInterval");
@@ -3750,24 +3773,68 @@ public class Session {
     }
   }
 
+  /** Tokens and ${ENV} are OpenSSH syntax, so values of other ConfigRepositories stay literal. */
+  private static boolean expandsTokens(ConfigRepository.Config config) {
+    return config instanceof OpenSSHConfig.MyConfig;
+  }
+
+  private String expandConfigPath(ConfigRepository.Config config, String value)
+      throws JSchException {
+    return expandsTokens(config) ? ConfigTokenExpander.expandPath(value, this::resolveConfigToken)
+        : value;
+  }
+
   String resolveConfigToken(char token) {
     switch (token) {
+      case 'C':
+        return connectionHash();
       case 'd':
-        return System.getProperty("user.home");
+        return Util.getSystemProperty("user.home");
       case 'h':
         return host;
+      case 'i':
+        return LocalIdentity.uid();
+      case 'j':
+        String jump = resolvedConfig == null ? null : resolvedConfig.getValue("ProxyJump");
+        return jump == null ? "" : jump;
+      case 'k':
+        return hostKeyAlias != null ? hostKeyAlias : org_host;
+      case 'L':
+        String local = LocalIdentity.hostname();
+        return local == null ? null : local.split("\\.", 2)[0];
+      case 'l':
+        return LocalIdentity.hostname();
       case 'n':
         return org_host;
       case 'p':
         return Integer.toString(port);
       case 'r':
-        return username != null ? username : System.getProperty("user.name");
+        return username != null ? username : Util.getSystemProperty("user.name");
       case 'u':
-        return System.getProperty("user.name");
-      case 'k':
-        return hostKeyAlias != null ? hostKeyAlias : org_host;
+        return Util.getSystemProperty("user.name");
       default:
         return null;
+    }
+  }
+
+  /** OpenSSH's %C: SHA-1 of %l%h%p%r%j in lowercase hex. */
+  private String connectionHash() {
+    String local = LocalIdentity.hostname();
+    if (local == null) {
+      return null;
+    }
+    StringBuilder input = new StringBuilder(local).append(host).append(port)
+        .append(resolveConfigToken('r')).append(resolveConfigToken('j'));
+    try {
+      byte[] digest = java.security.MessageDigest.getInstance("SHA-1")
+          .digest(input.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder();
+      for (byte b : digest) {
+        hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+      }
+      return hex.toString();
+    } catch (java.security.NoSuchAlgorithmException e) {
+      return null;
     }
   }
 
