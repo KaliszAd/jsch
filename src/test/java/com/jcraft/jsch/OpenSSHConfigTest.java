@@ -333,4 +333,14 @@ class OpenSSHConfigTest {
   private static void write(Path path, String value) throws IOException {
     Files.write(path, value.getBytes(StandardCharsets.UTF_8));
   }
+
+  @Test
+  void trailingCommentsAreIgnoredLikeOpenSsh() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig.parse(String.join("\n", "Host other # alias", "  Port 20",
+        "Host alias", "  User bob # comment", "  HostName h#1", "  Port # none", ""));
+    assertEquals(-1, config.getConfig("alias").getPort());
+    assertEquals("bob", config.getConfig("alias").getUser());
+    assertEquals("h#1", config.getConfig("alias").getHostname());
+    assertEquals(20, config.getConfig("other").getPort());
+  }
 }

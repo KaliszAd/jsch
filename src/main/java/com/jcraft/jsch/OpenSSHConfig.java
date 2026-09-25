@@ -195,9 +195,9 @@ public class OpenSSHConfig implements ConfigRepository {
       return current;
     }
     String key = keyValue[0].trim();
-    String value = keyValue[1].trim();
+    String value = stripComment(keyValue[1].trim());
     if (value.startsWith("=")) {
-      value = value.substring(1).trim();
+      value = stripComment(value.substring(1).trim());
     }
     if (key.equalsIgnoreCase("Host")) {
       if (value.isEmpty()) {
@@ -220,6 +220,33 @@ public class OpenSSHConfig implements ConfigRepository {
     }
     current.options.addElement(new String[] {key, value});
     return current;
+  }
+
+  /**
+   * Drops a trailing comment like OpenSSH: an unquoted, unescaped {@code #} that starts a word ends
+   * the value, while one inside a word ({@code h#1}) or inside quotes is kept.
+   */
+  private static String stripComment(String value) {
+    char quote = 0;
+    for (int i = 0; i < value.length(); i++) {
+      char ch = value.charAt(i);
+      if (ch == '\\' && i + 1 < value.length() && isEscapable(value.charAt(i + 1), quote)) {
+        i++;
+      } else if (quote != 0) {
+        if (ch == quote) {
+          quote = 0;
+        }
+      } else if (ch == '"' || ch == '\'') {
+        quote = ch;
+      } else if (ch == '#' && (i == 0 || Character.isWhitespace(value.charAt(i - 1)))) {
+        return value.substring(0, i).trim();
+      }
+    }
+    return value;
+  }
+
+  private static boolean isEscapable(char next, char quote) {
+    return next == '\\' || next == '"' || next == '\'' || (quote == 0 && next == ' ');
   }
 
   private void includeFiles(String value, Path includeBase, Set<Path> activeFiles, int depth,
