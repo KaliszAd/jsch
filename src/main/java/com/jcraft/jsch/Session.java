@@ -258,8 +258,12 @@ public class Session {
         }
       }
 
-      if (connectTimeout > 0 && socket != null) {
-        socket.setSoTimeout(connectTimeout);
+      if (connectTimeout > 0) {
+        if (socket != null) {
+          socket.setSoTimeout(connectTimeout);
+        } else if (proxy instanceof ReadTimeoutProxy) {
+          ((ReadTimeoutProxy) proxy).setReadTimeout(connectTimeout);
+        }
       }
 
       isConnected = true;
@@ -531,8 +535,12 @@ public class Session {
             (auth_cancel ? "Auth cancel" : "Auth fail") + " for methods '" + smethods + "'");
       }
 
-      if (socket != null && (connectTimeout > 0 || timeout > 0)) {
-        socket.setSoTimeout(timeout);
+      if (connectTimeout > 0 || timeout > 0) {
+        if (socket != null) {
+          socket.setSoTimeout(timeout);
+        } else if (proxy instanceof ReadTimeoutProxy) {
+          ((ReadTimeoutProxy) proxy).setReadTimeout(timeout);
+        }
       }
 
       isAuthed = true;
@@ -3085,6 +3093,9 @@ public class Session {
     if (socket == null) {
       if (timeout < 0) {
         throw new JSchException("invalid timeout value");
+      }
+      if (proxy instanceof ReadTimeoutProxy) {
+        ((ReadTimeoutProxy) proxy).setReadTimeout(timeout);
       }
       this.timeout = timeout;
       return;

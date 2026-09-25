@@ -2,23 +2,29 @@ package com.jcraft.jsch;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 /** Carries an SSH connection through one or more direct-tcpip channels. */
-public final class ProxyJump implements Proxy {
+public final class ProxyJump implements ReadTimeoutProxy {
   private static final ThreadLocal<Set<String>> CONNECTING = ThreadLocal.withInitial(HashSet::new);
 
   private final Session target;
   private final List<Hop> hops;
   private final List<Session> sessions = new ArrayList<>();
   private ChannelDirectTCPIP channel;
-  private InputStream in;
+  private TimeoutInputStream in;
   private OutputStream out;
 
   public ProxyJump(Session target, String specification) throws JSchException {
@@ -95,6 +101,16 @@ public final class ProxyJump implements Proxy {
   @Override
   public Socket getSocket() {
     return null;
+  }
+
+  @Override
+  public void setReadTimeout(int timeout) throws JSchException {
+    if (timeout < 0) {
+      throw new JSchException("invalid timeout value");
+    }
+    if (in != null) {
+      in.setTimeout(timeout);
+    }
   }
 
   @Override
@@ -196,10 +212,10 @@ public final class ProxyJump implements Proxy {
     }
   }
 
-  private static final class ChannelProxy implements Proxy {
+  private static final class ChannelProxy implements ReadTimeoutProxy {
     private final Session previous;
     private ChannelDirectTCPIP channel;
-    private InputStream in;
+    private TimeoutInputStream in;
     private OutputStream out;
 
     ChannelProxy(Session previous) {
@@ -216,7 +232,7 @@ public final class ProxyJump implements Proxy {
       channel.setHost(host);
       channel.setPort(port);
       try {
-        in = channel.getInputStream();
+        in = new TimeoutInputStream(channel.getInputStream(), channel::isConnected);
         out = channel.getOutputStream();
         channel.connect(timeout);
         if (!channel.isConnected()) {
@@ -244,6 +260,16 @@ public final class ProxyJump implements Proxy {
     }
 
     @Override
+    public void setReadTimeout(int timeout) throws JSchException {
+      if (timeout < 0) {
+        throw new JSchException("invalid timeout value");
+      }
+      if (in != null) {
+        in.setTimeout(timeout);
+      }
+    }
+
+    @Override
     public void close() {
       if (channel != null) {
         channel.disconnect();
@@ -251,6 +277,61 @@ public final class ProxyJump implements Proxy {
       }
       in = null;
       out = null;
+    }
+  }
+
+  static final class TimeoutInputStream extends FilterInputStream {
+    private final BooleanSupplier connected;
+    private final byte[] singleByte = new byte[1];
+    private volatile int timeout;
+
+    TimeoutInputStream(InputStream in, BooleanSupplier connected) {
+      super(in);
+      this.connected = connected;
+    }
+
+    void setTimeout(int timeout) {
+      this.timeout = timeout;
+    }
+
+    @Override
+    public int read() throws IOException {
+      int count = read(singleByte, 0, 1);
+      return count < 0 ? -1 : singleByte[0] & 0xff;
+    }
+
+    @Override
+    public int read(byte[] bytes, int offset, int length) throws IOException {
+      if (length == 0) {
+        return 0;
+      }
+      if (offset < 0 || length < 0 || offset > bytes.length - length) {
+        throw new IndexOutOfBoundsException();
+      }
+      int readTimeout = timeout;
+      if (readTimeout == 0) {
+        return in.read(bytes, offset, length);
+      }
+      long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readTimeout);
+      while (true) {
+        int available = in.available();
+        if (available > 0) {
+          return in.read(bytes, offset, Math.min(length, available));
+        }
+        if (!connected.getAsBoolean()) {
+          return -1;
+        }
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0) {
+          throw new SocketTimeoutException("ProxyJump read timed out");
+        }
+        try {
+          TimeUnit.NANOSECONDS.sleep(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(10)));
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new InterruptedIOException("ProxyJump read interrupted");
+        }
+      }
     }
   }
 }

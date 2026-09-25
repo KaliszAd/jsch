@@ -4,7 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.net.SocketTimeoutException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 class ProxyJumpTest {
@@ -48,5 +52,21 @@ class ProxyJumpTest {
     assertEquals("ProxyJump cycle involving loop", error.getMessage());
     error = assertThrows(JSchException.class, session::connect);
     assertEquals("ProxyJump cycle involving loop", error.getMessage());
+  }
+
+  @Test
+  void channelStreamHonorsReadTimeoutAndDisconnect() throws Exception {
+    AtomicBoolean connected = new AtomicBoolean(true);
+    try (PipedInputStream pipe = new PipedInputStream();
+        PipedOutputStream writer = new PipedOutputStream(pipe);
+        ProxyJump.TimeoutInputStream stream =
+            new ProxyJump.TimeoutInputStream(pipe, connected::get)) {
+      stream.setTimeout(50);
+      assertThrows(SocketTimeoutException.class, stream::read);
+      writer.write(42);
+      assertEquals(42, stream.read());
+      connected.set(false);
+      assertEquals(-1, stream.read());
+    }
   }
 }
