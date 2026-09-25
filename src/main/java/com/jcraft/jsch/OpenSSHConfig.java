@@ -405,7 +405,16 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static List<Path> expandInclude(String pattern, Path includeBase) throws IOException {
-    String name = pattern;
+    String name;
+    try {
+      name = ConfigTokenExpander.expandPath(pattern,
+          token -> token == 'd' ? System.getProperty("user.home") : null);
+    } catch (JSchException e) {
+      throw new IOException("Invalid Include path: " + pattern, e);
+    }
+    if (name == null) {
+      return Collections.emptyList();
+    }
     if (name.startsWith("~") && !name.equals("~") && !name.startsWith("~/")) {
       throw new IOException("Unsupported Include home path: " + pattern);
     }
