@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -95,7 +96,7 @@ class SessionIdentityFileTokenTest {
         (local + "real.example2222remotea,b").getBytes(java.nio.charset.StandardCharsets.UTF_8));
     StringBuilder hex = new StringBuilder();
     for (byte b : digest) {
-      hex.append(String.format("%02x", b & 0xff));
+      hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
     }
     assertEquals(hex.toString(), ConfigTokenExpander.expandPath("%C", session::resolveConfigToken));
     if (java.io.File.separatorChar == '/') {

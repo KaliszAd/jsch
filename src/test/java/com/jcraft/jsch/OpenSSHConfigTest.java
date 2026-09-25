@@ -474,7 +474,8 @@ class OpenSSHConfigTest {
     String originalHome = System.getProperty("user.home");
     try {
       System.setProperty("user.home", tempDir.toString());
-      Files.write(tempDir.resolve("inc.conf"), "Host alias\n  Port 2345\n".getBytes());
+      Files.write(tempDir.resolve("inc.conf"),
+          "Host alias\n  Port 2345\n".getBytes(StandardCharsets.UTF_8));
       String user = System.getProperty("user.name");
       assertEquals(2345,
           OpenSSHConfig.parse("Include ~" + user + "/inc.conf\n").getConfig("alias").getPort());
@@ -491,7 +492,8 @@ class OpenSSHConfigTest {
     String originalHome = System.getProperty("user.home");
     try {
       System.setProperty("user.home", tempDir.toString());
-      Files.write(tempDir.resolve("inc.conf"), "Host alias\n  Port 2346\n".getBytes());
+      Files.write(tempDir.resolve("inc.conf"),
+          "Host alias\n  Port 2346\n".getBytes(StandardCharsets.UTF_8));
       assertEquals(2346, OpenSSHConfig.parse("Include ~\\inc.conf\n").getConfig("alias").getPort());
     } finally {
       System.setProperty("user.home", originalHome);
@@ -502,9 +504,10 @@ class OpenSSHConfigTest {
   void systemFileResolvesRelativeIncludesAgainstItsDirectory() throws IOException {
     Path etc = Files.createDirectories(tempDir.resolve("etc-ssh"));
     Files.createDirectories(etc.resolve("ssh_config.d"));
-    Files.write(etc.resolve("ssh_config.d/10.conf"), "Host alias\n  Port 2347\n".getBytes());
+    Files.write(etc.resolve("ssh_config.d/10.conf"),
+        "Host alias\n  Port 2347\n".getBytes(StandardCharsets.UTF_8));
     Path system = etc.resolve("ssh_config");
-    Files.write(system, "Include ssh_config.d/*.conf\n".getBytes());
+    Files.write(system, "Include ssh_config.d/*.conf\n".getBytes(StandardCharsets.UTF_8));
     assertEquals(2347,
         OpenSSHConfig.parseSystemFile(system.toString()).getConfig("alias").getPort());
   }
