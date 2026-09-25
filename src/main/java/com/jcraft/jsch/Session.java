@@ -3665,6 +3665,10 @@ public class Session {
     if (port != -1)
       this.port = port;
 
+    value = config.getValue("ProxyJump");
+    if (value != null && !value.equalsIgnoreCase("none"))
+      this.proxy = new ProxyJump(this, value);
+
     checkConfig(config, "kex");
     checkConfig(config, "server_host_key");
     checkConfig(config, "prefer_known_host_key_types");
