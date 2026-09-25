@@ -65,9 +65,10 @@ public final class ProxyJump implements ReadTimeoutProxy {
     return previous;
   }
 
-  private Session createHop(Hop hop, Session previous, SocketFactory socketFactory)
+  Session createHop(Hop hop, Session previous, SocketFactory socketFactory)
       throws JSchException {
     Session next = target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? 22 : hop.port);
+    target.applyExplicitHostKeyPolicyTo(next);
     if (hop.port != 0) {
       next.setPort(hop.port);
     }

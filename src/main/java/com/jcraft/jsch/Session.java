@@ -149,6 +149,10 @@ public class Session {
   SocketFactory socket_factory = null;
 
   private Hashtable<String, String> config = null;
+  private boolean constructionComplete;
+  private String explicitStrictHostKeyChecking;
+  private String explicitHostKeyAlgorithms;
+  private HostKeyRepository explicitHostKeyRepository;
 
   private Proxy proxy = null;
   private UserInfo userinfo;
@@ -203,6 +207,7 @@ public class Session {
     if (this.username == null) {
       throw new JSchException("username is not given.");
     }
+    constructionComplete = true;
   }
 
   public void connect() throws JSchException {
@@ -3044,6 +3049,7 @@ public class Session {
             (newkey.equals("PubkeyAcceptedKeyTypes") ? "PubkeyAcceptedAlgorithms" : newkey);
         String value = newconf.get(newkey);
         config.put(key, value);
+        trackExplicitHostKeyConfig(key, value);
       }
     }
   }
@@ -3058,6 +3064,31 @@ public class Session {
       } else {
         config.put(key, value);
       }
+      trackExplicitHostKeyConfig(key, value);
+    }
+  }
+
+  private void trackExplicitHostKeyConfig(String key, String value) {
+    if (!constructionComplete) {
+      return;
+    }
+    if (key.equals("StrictHostKeyChecking")) {
+      explicitStrictHostKeyChecking = value;
+    } else if (key.equals("server_host_key")) {
+      explicitHostKeyAlgorithms = value;
+    }
+  }
+
+  void applyExplicitHostKeyPolicyTo(Session hop) {
+    // Keep the hop's Host config, but carry explicit application-level host-key constraints.
+    if (explicitHostKeyRepository != null) {
+      hop.setHostKeyRepository(explicitHostKeyRepository);
+    }
+    if (explicitStrictHostKeyChecking != null) {
+      hop.setConfig("StrictHostKeyChecking", explicitStrictHostKeyChecking);
+    }
+    if (explicitHostKeyAlgorithms != null) {
+      hop.setConfig("server_host_key", explicitHostKeyAlgorithms);
     }
   }
 
@@ -3622,6 +3653,9 @@ public class Session {
    */
   public void setHostKeyRepository(HostKeyRepository hostkeyRepository) {
     this.hostkeyRepository = hostkeyRepository;
+    if (constructionComplete) {
+      explicitHostKeyRepository = hostkeyRepository;
+    }
   }
 
   /**
