@@ -191,7 +191,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
             wait(); // another thread is opening the hop
           } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new JSchException("ProxyJump hop connect interrupted");
+            throw new JSchException("ProxyJump hop connect interrupted", e);
           }
         }
       }
@@ -476,7 +476,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
     try {
       port = Integer.parseInt(value);
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("bad port");
+      throw new IllegalArgumentException("bad port", e);
     }
     if (port < 1 || port > 65535) {
       throw new IllegalArgumentException("bad port");
@@ -681,7 +681,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
         try {
           wait(left);
         } catch (InterruptedException e) {
-          throw interrupted();
+          throw interrupted(e);
         }
       }
       int n = Math.min(length, count);
@@ -701,9 +701,12 @@ public final class ProxyJump implements ReadTimeoutProxy {
       notifyAll();
     }
 
-    private static InterruptedIOException interrupted() {
+    private static InterruptedIOException interrupted(InterruptedException cause) {
       Thread.currentThread().interrupt();
-      return new InterruptedIOException("ProxyJump tunnel interrupted");
+      InterruptedIOException interrupted =
+          new InterruptedIOException("ProxyJump tunnel interrupted");
+      interrupted.initCause(cause);
+      return interrupted;
     }
 
     /** The channel's side: blocks while the buffer is full, fails once it is closed. */
@@ -721,7 +724,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
               try {
                 TunnelBuffer.this.wait();
               } catch (InterruptedException e) {
-                throw interrupted();
+                throw interrupted(e);
               }
             }
             if (closed) {

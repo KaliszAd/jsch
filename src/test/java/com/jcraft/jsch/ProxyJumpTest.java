@@ -257,7 +257,7 @@ class ProxyJumpTest {
   }
 
   @Test
-  void sharedHopCloseDoesNotWaitForAHopStillConnecting() throws Exception {
+  void sharedHopCloseDoesNotWaitForAHopStillConnecting() {
     JSch jsch = new JSch();
     java.util.concurrent.CountDownLatch connecting = new java.util.concurrent.CountDownLatch(1);
     java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
@@ -271,6 +271,7 @@ class ProxyJumpTest {
             closed.await(); // a slow bastion or an unanswered prompt
           } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
           }
           super.connect(timeout);
         }
@@ -312,6 +313,7 @@ class ProxyJumpTest {
             allStarted.await();
           } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
           }
           super.connect(timeout);
         }
@@ -574,8 +576,10 @@ class ProxyJumpTest {
           while (true) {
             accepted.add(silent.accept());
           }
-        } catch (Exception e) {
-          // closed
+        } catch (java.io.IOException e) {
+          if (!silent.isClosed()) {
+            throw new IllegalStateException(e);
+          }
         }
       });
       acceptor.setDaemon(true);
@@ -623,8 +627,8 @@ class ProxyJumpTest {
           tunnel.sink().write(data, i, Math.min(step, data.length - i));
         }
         tunnel.sink().close();
-      } catch (Exception e) {
-        // reported by the reader timing out
+      } catch (java.io.IOException e) {
+        throw new IllegalStateException(e); // the reader also reports it by timing out
       }
     });
     ByteArrayOutputStream received = new ByteArrayOutputStream();

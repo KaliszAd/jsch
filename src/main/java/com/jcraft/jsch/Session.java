@@ -800,37 +800,36 @@ public class Session {
       kex += ",kex-strict-c-v00@openssh.com";
     }
 
-    String server_host_key = getConfig(SERVER_HOST_KEY);
+    String serverHostKey = getConfig(SERVER_HOST_KEY);
     String[] not_available_shks = checkSignatures(getConfig("CheckSignatures"));
     // Cache for UserAuthPublicKey
     this.not_available_shks = not_available_shks;
     if (not_available_shks != null && not_available_shks.length > 0) {
       if (getLogger().isEnabled(Logger.DEBUG)) {
         getLogger().log(Logger.DEBUG,
-            "server_host_key proposal before removing unavailable algos is: " + server_host_key);
+            "server_host_key proposal before removing unavailable algos is: " + serverHostKey);
       }
 
-      server_host_key = Util.diffString(server_host_key, not_available_shks);
-      if (server_host_key == null) {
+      serverHostKey = Util.diffString(serverHostKey, not_available_shks);
+      if (serverHostKey == null) {
         throw new JSchException("There are not any available sig algorithm.");
       }
 
       if (getLogger().isEnabled(Logger.DEBUG)) {
         getLogger().log(Logger.DEBUG,
-            "server_host_key proposal after removing unavailable algos is: " + server_host_key);
+            "server_host_key proposal after removing unavailable algos is: " + serverHostKey);
       }
 
       // Also filter out certificate types for unavailable base algorithms
-      server_host_key =
-          OpenSshCertificateUtil.filterUnavailableCertTypes(server_host_key, not_available_shks);
-      if (server_host_key == null) {
+      serverHostKey =
+          OpenSshCertificateUtil.filterUnavailableCertTypes(serverHostKey, not_available_shks);
+      if (serverHostKey == null) {
         throw new JSchException("There are not any available signature algorithms.");
       }
 
       if (getLogger().isEnabled(Logger.DEBUG)) {
         getLogger().log(Logger.DEBUG,
-            "server_host_key proposal after removing unavailable cert algos is: "
-                + server_host_key);
+            "server_host_key proposal after removing unavailable cert algos is: " + serverHostKey);
       }
     }
 
@@ -838,7 +837,7 @@ public class Session {
     if (prefer_hkr.equals("yes")) {
       if (getLogger().isEnabled(Logger.DEBUG)) {
         getLogger().log(Logger.DEBUG,
-            "server_host_key proposal before known_host reordering is: " + server_host_key);
+            "server_host_key proposal before known_host reordering is: " + serverHostKey);
       }
 
       HostKeyRepository hkr = getHostKeyRepository();
@@ -852,7 +851,7 @@ public class Session {
       HostKey[] hks = hkr.getHostKey(chost, null);
       if (hks != null && hks.length > 0) {
         List<String> pref_shks = new ArrayList<>();
-        List<String> shks = new ArrayList<>(Arrays.asList(Util.split(server_host_key, ",")));
+        List<String> shks = new ArrayList<>(Arrays.asList(Util.split(serverHostKey, ",")));
         Iterator<String> it = shks.iterator();
         while (it.hasNext()) {
           String algo = it.next();
@@ -885,13 +884,13 @@ public class Session {
         }
         if (pref_shks.size() > 0) {
           pref_shks.addAll(shks);
-          server_host_key = String.join(",", pref_shks);
+          serverHostKey = String.join(",", pref_shks);
         }
       }
 
       if (getLogger().isEnabled(Logger.DEBUG)) {
         getLogger().log(Logger.DEBUG,
-            "server_host_key proposal after known_host reordering is: " + server_host_key);
+            "server_host_key proposal after known_host reordering is: " + serverHostKey);
       }
     }
 
@@ -919,7 +918,7 @@ public class Session {
       buf.skip(16);
     }
     buf.putString(Util.str2byte(kex));
-    buf.putString(Util.str2byte(server_host_key));
+    buf.putString(Util.str2byte(serverHostKey));
     buf.putString(Util.str2byte(cipherc2s));
     buf.putString(Util.str2byte(ciphers2c));
     buf.putString(Util.str2byte(getConfig("mac.c2s")));

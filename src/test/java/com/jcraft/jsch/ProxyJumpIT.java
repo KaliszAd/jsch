@@ -9,7 +9,7 @@ import com.github.valfirst.slf4jtest.LoggingEvent;
 import com.github.valfirst.slf4jtest.TestLogger;
 import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -31,16 +31,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * port, and the target, which the hop reaches as {@code 127.0.0.1:22} inside the container.
  */
 @Testcontainers
-public class ProxyJumpIT {
+class ProxyJumpIT {
 
-  private static final int timeout = 5000;
+  private static final int TIMEOUT = 5000;
   private static final TestLogger jschLogger = TestLoggerFactory.getTestLogger(JSch.class);
   private static final TestLogger sshdLogger = TestLoggerFactory.getTestLogger(ProxyJumpIT.class);
 
   private Slf4jLogConsumer sshdLogConsumer;
 
   @Container
-  public GenericContainer<?> sshd = new GenericContainer<>(
+  GenericContainer<?> sshd = new GenericContainer<>(
       new ImageFromDockerfile().withFileFromClasspath("ssh_host_rsa_key", "docker/ssh_host_rsa_key")
           .withFileFromClasspath("ssh_host_rsa_key.pub", "docker/ssh_host_rsa_key.pub")
           .withFileFromClasspath("ssh_host_ecdsa256_key", "docker/ssh_host_ecdsa256_key")
@@ -57,12 +57,12 @@ public class ProxyJumpIT {
       .withExposedPorts(22);
 
   @BeforeAll
-  public static void beforeAll() {
+  static void beforeAll() {
     JSch.setLogger(new Slf4jLogger());
   }
 
   @BeforeEach
-  public void beforeEach() throws IOException {
+  void beforeEach() {
     if (sshdLogConsumer == null) {
       sshdLogConsumer = new Slf4jLogConsumer(sshdLogger);
       sshd.followOutput(sshdLogConsumer);
@@ -73,14 +73,14 @@ public class ProxyJumpIT {
   }
 
   @AfterAll
-  public static void afterAll() {
+  static void afterAll() {
     JSch.setLogger(null);
     jschLogger.clearAll();
     sshdLogger.clearAll();
   }
 
   @Test
-  public void testOneAndTwoHopsFromConfig() throws Exception {
+  void testOneAndTwoHopsFromConfig() throws Exception {
     JSch ssh = createRSAIdentity();
     ssh.setConfigRepository(OpenSSHConfig.parse(String.join("\n", //
         "Host jump", "  HostName " + sshd.getHost(), "  Port " + sshd.getFirstMappedPort(),
@@ -96,8 +96,8 @@ public class ProxyJumpIT {
     for (String alias : new String[] {"one-hop", "two-hops"}) {
       Session session = ssh.getSession(alias);
       try {
-        session.setTimeout(timeout);
-        session.connect(timeout);
+        session.setTimeout(TIMEOUT);
+        session.connect(TIMEOUT);
         assertTrue(session.isConnected(), alias);
         assertEquals("root", exec(session, "whoami"), alias);
         assertTrue(exec(session, "echo $SSH_CONNECTION").startsWith("127.0.0.1 "),
@@ -112,7 +112,7 @@ public class ProxyJumpIT {
   }
 
   @Test
-  public void testSharedHopOpensWithFirstSessionAndClosesWithLast() throws Exception {
+  void testSharedHopOpensWithFirstSessionAndClosesWithLast() throws Exception {
     JSch ssh = createRSAIdentity();
     List<Session> hops = new ArrayList<>();
     ProxyJump.SharedHop shared = ProxyJump.share(() -> {
@@ -125,8 +125,8 @@ public class ProxyJumpIT {
     try {
       Session first = createTargetSession(ssh, shared.proxy());
       Session second = createTargetSession(ssh, shared.proxy());
-      first.connect(timeout);
-      second.connect(timeout);
+      first.connect(TIMEOUT);
+      second.connect(TIMEOUT);
       assertEquals(1, hops.size(), "both sessions share one hop");
       assertTrue(shared.isOpen());
       assertEquals("root", exec(first, "whoami"));
@@ -140,7 +140,7 @@ public class ProxyJumpIT {
       assertFalse(hops.get(0).isConnected());
 
       Session third = createTargetSession(ssh, shared.proxy());
-      third.connect(timeout);
+      third.connect(TIMEOUT);
       assertEquals(2, hops.size(), "a later session opened a fresh hop");
       assertTrue(shared.isOpen());
       third.disconnect();
@@ -154,15 +154,15 @@ public class ProxyJumpIT {
   }
 
   @Test
-  public void testThroughLeavesHopToCaller() throws Exception {
+  void testThroughLeavesHopToCaller() throws Exception {
     JSch ssh = createRSAIdentity();
     Session hop = ssh.getSession("root", sshd.getHost(), sshd.getFirstMappedPort());
     hop.setConfig("StrictHostKeyChecking", "yes");
     hop.setConfig("PreferredAuthentications", "publickey");
     try {
-      hop.connect(timeout);
+      hop.connect(TIMEOUT);
       Session target = createTargetSession(ssh, ProxyJump.through(hop));
-      target.connect(timeout);
+      target.connect(TIMEOUT);
       assertEquals("root", exec(target, "whoami"));
       target.disconnect();
       assertTrue(hop.isConnected(), "closing the target does not close a caller-owned hop");
@@ -180,18 +180,19 @@ public class ProxyJumpIT {
     session.setConfig("StrictHostKeyChecking", "yes");
     session.setConfig("PreferredAuthentications", "publickey");
     session.setProxy(proxy);
-    session.setTimeout(timeout);
+    session.setTimeout(TIMEOUT);
     return session;
   }
 
   private static String exec(Session session, String command) throws Exception {
     ChannelExec channel = (ChannelExec) session.openChannel("exec");
     channel.setCommand(command);
+    InputStream in = channel.getInputStream();
+    channel.connect(TIMEOUT);
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    channel.setOutputStream(out);
-    channel.connect(timeout);
-    for (int i = 0; i < 100 && !channel.isClosed(); i++) {
-      Thread.sleep(50);
+    byte[] buffer = new byte[8192];
+    for (int n; (n = in.read(buffer)) >= 0;) {
+      out.write(buffer, 0, n);
     }
     channel.disconnect();
     return new String(out.toByteArray(), UTF_8).trim();
