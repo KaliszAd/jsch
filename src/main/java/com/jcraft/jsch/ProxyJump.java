@@ -35,31 +35,8 @@ public final class ProxyJump implements Proxy {
       throw new JSchException("ProxyJump cycle involving " + key);
     }
     try {
-      Session previous = null;
-      for (Hop hop : hops) {
-        Session next = target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? 22 : hop.port);
-        sessions.add(next);
-        if (hop.port != 0) {
-          next.setPort(hop.port);
-        }
-        if (target.getUserInfo() != null) {
-          next.setUserInfo(target.getUserInfo());
-        }
-        if (previous == null) {
-          if (socketFactory != null) {
-            next.setSocketFactory(socketFactory);
-          }
-        } else {
-          next.setProxy(new ChannelProxy(previous));
-        }
-        next.connect(timeout);
-        previous = next;
-      }
-      ChannelProxy finalProxy = new ChannelProxy(previous);
-      finalProxy.connect(socketFactory, host, port, timeout);
-      channel = finalProxy.channel;
-      in = finalProxy.in;
-      out = finalProxy.out;
+      Session previous = connectHops(socketFactory, timeout);
+      connectDestination(previous, socketFactory, host, port, timeout);
     } catch (Exception e) {
       close();
       throw e;
@@ -69,6 +46,43 @@ public final class ProxyJump implements Proxy {
         CONNECTING.remove();
       }
     }
+  }
+
+  private Session connectHops(SocketFactory socketFactory, int timeout) throws Exception {
+    Session previous = null;
+    for (Hop hop : hops) {
+      Session next = createHop(hop, previous, socketFactory);
+      sessions.add(next);
+      next.connect(timeout);
+      previous = next;
+    }
+    return previous;
+  }
+
+  private Session createHop(Hop hop, Session previous, SocketFactory socketFactory)
+      throws JSchException {
+    Session next = target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? 22 : hop.port);
+    if (hop.port != 0) {
+      next.setPort(hop.port);
+    }
+    if (target.getUserInfo() != null) {
+      next.setUserInfo(target.getUserInfo());
+    }
+    if (previous != null) {
+      next.setProxy(new ChannelProxy(previous));
+    } else if (socketFactory != null) {
+      next.setSocketFactory(socketFactory);
+    }
+    return next;
+  }
+
+  private void connectDestination(Session previous, SocketFactory socketFactory, String host,
+      int port, int timeout) throws Exception {
+    ChannelProxy finalProxy = new ChannelProxy(previous);
+    finalProxy.connect(socketFactory, host, port, timeout);
+    channel = finalProxy.channel;
+    in = finalProxy.in;
+    out = finalProxy.out;
   }
 
   @Override
@@ -106,71 +120,71 @@ public final class ProxyJump implements Proxy {
     }
     List<Hop> result = new ArrayList<>();
     for (String item : specification.split(",", -1)) {
-      if (item.isEmpty() || !item.equals(item.trim())) {
-        throw new JSchException("Invalid ProxyJump host: " + item);
-      }
       try {
-        String user;
-        String host;
-        int port = 0;
-        if (item.startsWith("ssh://")) {
-          URI uri = URI.create(item);
-          if (!"ssh".equals(uri.getScheme()) || uri.getHost() == null
-              || (uri.getRawPath() != null && !uri.getRawPath().isEmpty())
-              || uri.getRawQuery() != null || uri.getRawFragment() != null) {
-            throw new IllegalArgumentException();
-          }
-          user = uri.getUserInfo();
-          host = uri.getHost();
-          port = uri.getPort();
-          if (host.startsWith("[") && host.endsWith("]")) {
-            host = host.substring(1, host.length() - 1);
-          }
-          if (port < 0) {
-            port = 0;
-          } else if (port == 0) {
-            throw new IllegalArgumentException();
-          }
-        } else {
-          int at = item.indexOf('@');
-          user = at < 0 ? null : item.substring(0, at);
-          String address = item.substring(at + 1);
-          if (address.startsWith("[")) {
-            int end = address.indexOf(']');
-            if (end < 0 || (end + 1 < address.length() && address.charAt(end + 1) != ':')) {
-              throw new IllegalArgumentException();
-            }
-            host = address.substring(1, end);
-            if (end + 1 < address.length()) {
-              port = Integer.parseInt(address.substring(end + 2));
-              if (port == 0) {
-                throw new IllegalArgumentException();
-              }
-            }
-          } else {
-            int colon = address.indexOf(':');
-            if (colon != address.lastIndexOf(':')) {
-              throw new IllegalArgumentException();
-            }
-            host = colon < 0 ? address : address.substring(0, colon);
-            if (colon >= 0) {
-              port = Integer.parseInt(address.substring(colon + 1));
-              if (port == 0) {
-                throw new IllegalArgumentException();
-              }
-            }
-          }
-        }
-        if (host == null || host.isEmpty() || (user != null && user.isEmpty())
-            || port < 0 || port > 65535 || item.indexOf(' ') >= 0) {
-          throw new IllegalArgumentException();
-        }
-        result.add(new Hop(user, host, port));
+        result.add(parseHop(item));
       } catch (IllegalArgumentException e) {
         throw new JSchException("Invalid ProxyJump host: " + item, e);
       }
     }
     return Collections.unmodifiableList(result);
+  }
+
+  private static Hop parseHop(String item) {
+    if (item.isEmpty() || !item.equals(item.trim()) || item.indexOf(' ') >= 0) {
+      throw new IllegalArgumentException();
+    }
+    Hop hop = item.startsWith("ssh://") ? parseUriHop(item) : parseHostHop(item);
+    if (hop.host.isEmpty() || (hop.user != null && hop.user.isEmpty())) {
+      throw new IllegalArgumentException();
+    }
+    return hop;
+  }
+
+  private static Hop parseUriHop(String item) {
+    URI uri = URI.create(item);
+    if (!"ssh".equals(uri.getScheme()) || uri.getHost() == null
+        || (uri.getRawPath() != null && !uri.getRawPath().isEmpty()) || uri.getRawQuery() != null
+        || uri.getRawFragment() != null) {
+      throw new IllegalArgumentException();
+    }
+    String host = uri.getHost();
+    if (host.startsWith("[") && host.endsWith("]")) {
+      host = host.substring(1, host.length() - 1);
+    }
+    int port = uri.getPort();
+    if (port == 0 || port > 65535) {
+      throw new IllegalArgumentException();
+    }
+    return new Hop(uri.getUserInfo(), host, Math.max(port, 0));
+  }
+
+  private static Hop parseHostHop(String item) {
+    int at = item.indexOf('@');
+    String user = at < 0 ? null : item.substring(0, at);
+    String address = item.substring(at + 1);
+    if (address.startsWith("[")) {
+      int end = address.indexOf(']');
+      if (end < 0 || (end + 1 < address.length() && address.charAt(end + 1) != ':')) {
+        throw new IllegalArgumentException();
+      }
+      int port = end + 1 < address.length() ? parsePort(address.substring(end + 2)) : 0;
+      return new Hop(user, address.substring(1, end), port);
+    }
+    int colon = address.indexOf(':');
+    if (colon != address.lastIndexOf(':')) {
+      throw new IllegalArgumentException();
+    }
+    String host = colon < 0 ? address : address.substring(0, colon);
+    int port = colon < 0 ? 0 : parsePort(address.substring(colon + 1));
+    return new Hop(user, host, port);
+  }
+
+  private static int parsePort(String value) {
+    int port = Integer.parseInt(value);
+    if (port < 1 || port > 65535) {
+      throw new IllegalArgumentException();
+    }
+    return port;
   }
 
   static final class Hop {

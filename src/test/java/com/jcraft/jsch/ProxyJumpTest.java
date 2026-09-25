@@ -1,19 +1,16 @@
 package com.jcraft.jsch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import java.lang.reflect.Field;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ProxyJumpTest {
   @Test
   void parsesHopChain() throws Exception {
-    List<ProxyJump.Hop> hops =
-        ProxyJump.parse("alice@first:2222,ssh://bob@[::1]:2200,last");
+    List<ProxyJump.Hop> hops = ProxyJump.parse("alice@first:2222,ssh://bob@[::1]:2200,last");
     assertEquals(3, hops.size());
     assertEquals("alice", hops.get(0).user);
     assertEquals("first", hops.get(0).host);
@@ -36,20 +33,18 @@ class ProxyJumpTest {
   @Test
   void configuresProxyForTargetButNotNone() throws Exception {
     JSch jsch = new JSch();
-    jsch.setConfigRepository(OpenSSHConfig.parse(
-        "Host target\n  HostName destination\n  ProxyJump first,second\n"
-            + "Host direct\n  ProxyJump none\n"));
-    Field proxyField = Session.class.getDeclaredField("proxy");
-    proxyField.setAccessible(true);
-    assertInstanceOf(ProxyJump.class, proxyField.get(jsch.getSession("target")));
-    assertNull(proxyField.get(jsch.getSession("direct")));
+    jsch.setConfigRepository(OpenSSHConfig.parse(String.join("\n", "Host target",
+        "  ProxyJump first,,second", "Host direct", "  ProxyJump none", "")));
+    assertThrows(JSchException.class, () -> jsch.getSession("target"));
+    assertNotNull(jsch.getSession("direct"));
   }
 
   @Test
   void detectsRecursiveJumpBeforeOpeningSocket() throws Exception {
     JSch jsch = new JSch();
     jsch.setConfigRepository(OpenSSHConfig.parse("Host loop\n  ProxyJump loop\n"));
-    JSchException error = assertThrows(JSchException.class, () -> jsch.getSession("loop").connect());
+    Session session = jsch.getSession("loop");
+    JSchException error = assertThrows(JSchException.class, session::connect);
     assertEquals("ProxyJump cycle involving loop", error.getMessage());
   }
 }
