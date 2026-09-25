@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -280,10 +281,18 @@ class ProxyJumpTest {
       for (int i = 0; i < 16; i++) {
         acquired.add(pool.submit(() -> shared.acquire(1000)));
       }
-      List<java.util.concurrent.Future<?>> released = new ArrayList<>();
+      // All users hold the hop before any lets go; a release racing a queued acquire could
+      // legitimately close and reopen it, which is the documented behaviour, not a defect.
+      List<Session> hops = new ArrayList<>();
       for (java.util.concurrent.Future<Session> f : acquired) {
-        Session hop = f.get();
+        hops.add(f.get());
+      }
+      assertEquals(1, created.size(), "concurrent first users open one hop");
+      for (Session hop : hops) {
         assertSame(created.get(0), hop);
+      }
+      List<java.util.concurrent.Future<?>> released = new ArrayList<>();
+      for (Session hop : hops) {
         released.add(pool.submit(() -> shared.release(hop)));
       }
       for (java.util.concurrent.Future<?> f : released) {
@@ -410,16 +419,49 @@ class ProxyJumpTest {
   }
 
   @Test
-  void hopInheritsThreadSettingsAndLogger() throws Exception {
+  void hopInheritsUserInfoThreadSettingsAndLoggerButNotPassword() throws Exception {
     JSch jsch = new JSch();
     Session target = jsch.getSession("user", "target");
     ThreadFactory factory = Thread::new;
     Logger logger = new JulLogger();
+    UserInfo prompts = new UserInfo() {
+      @Override
+      public String getPassphrase() {
+        return null;
+      }
+
+      @Override
+      public String getPassword() {
+        return null;
+      }
+
+      @Override
+      public boolean promptPassword(String message) {
+        return false;
+      }
+
+      @Override
+      public boolean promptPassphrase(String message) {
+        return false;
+      }
+
+      @Override
+      public boolean promptYesNo(String message) {
+        return false;
+      }
+
+      @Override
+      public void showMessage(String message) {}
+    };
+    target.setUserInfo(prompts);
+    target.setPassword("target-only".getBytes(java.nio.charset.StandardCharsets.UTF_8));
     target.setDaemonThread(true);
     target.setThreadFactory(factory);
     target.setLogger(logger);
     Session hop =
         new ProxyJump(target, "jump").createHop(new ProxyJump.Hop("u", "jump", 0), null, null);
+    assertSame(prompts, hop.getUserInfo(), "hops prompt through the same UserInfo, like ssh -J");
+    assertNull(hop.password, "a password set for the target is not offered to hops");
     assertTrue(hop.daemon_thread);
     assertSame(factory, hop.getThreadFactory());
     assertSame(logger, hop.getLogger());

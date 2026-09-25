@@ -22,9 +22,11 @@ import java.util.concurrent.TimeUnit;
  * Each hop is a separate {@link Session} that uses its own {@code Host} configuration. Explicit
  * host-key constraints set on the target session by the application (a host-key repository, a
  * stricter {@code StrictHostKeyChecking}, or {@code server_host_key}) are also applied to the hops,
- * but a hop's own {@code StrictHostKeyChecking} is never weakened. Hops receive no {@link UserInfo}
- * or password from the target, so they must authenticate without prompting, for example with keys
- * from the identity repository, an agent, or their own {@code IdentityFile}.
+ * but a hop's own {@code StrictHostKeyChecking} is never weakened. Hops share the target's
+ * {@link UserInfo}, so like {@code ssh -J} they can ask for a password, a passphrase or a host-key
+ * decision, each prompt naming the hop it is for; a {@code UserInfo} that answers every prompt with
+ * the same password will send it to every hop. A password set with {@link Session#setPassword}
+ * applies to the target only.
  *
  * <p>
  * The whole chain shares one connect deadline: the largest {@code ConnectTimeout} of the target and
@@ -231,6 +233,7 @@ public final class ProxyJump implements ReadTimeoutProxy {
     Session next =
         target.jsch.getSession(hop.user, hop.host, hop.port == 0 ? DEFAULT_PORT : hop.port);
     target.applyExplicitHostKeyPolicyTo(next);
+    next.setUserInfo(target.getUserInfo());
     next.setDaemonThread(target.daemon_thread);
     next.setThreadFactory(target.getThreadFactory());
     if (target.getLogger() != target.jsch.getInstanceLogger()) {
