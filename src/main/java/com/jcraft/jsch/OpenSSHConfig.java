@@ -28,9 +28,11 @@ package com.jcraft.jsch;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
@@ -133,32 +135,34 @@ public class OpenSSHConfig implements ConfigRepository {
 
   private OpenSSHConfig(BufferedReader br, Path includeBase, Set<Path> activeFiles)
       throws IOException {
-    Section global = new Section("");
+    Section global = new Section("", Collections.emptyList());
     sections.add(global);
-    parse(br, includeBase, activeFiles, 0, global);
+    parse(br, includeBase, activeFiles, 0, global, Collections.emptyList());
   }
 
   private static final class Section {
     final String host;
+    final List<String> enclosingHosts;
     final Vector<String[]> options = new Vector<>();
 
-    Section(String host) {
+    Section(String host, List<String> enclosingHosts) {
       this.host = host;
+      this.enclosingHosts = enclosingHosts;
     }
   }
 
   private final Vector<Section> sections = new Vector<>();
 
   private void parse(BufferedReader br, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current) throws IOException {
+      Section current, List<String> enclosingHosts) throws IOException {
     String line;
     while ((line = br.readLine()) != null) {
-      current = parseLine(line, includeBase, activeFiles, depth, current);
+      current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts);
     }
   }
 
   private Section parseLine(String line, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current) throws IOException {
+      Section current, List<String> enclosingHosts) throws IOException {
     line = line.trim();
     if (line.isEmpty() || line.startsWith("#")) {
       return current;
@@ -173,13 +177,16 @@ public class OpenSSHConfig implements ConfigRepository {
       value = value.substring(1).trim();
     }
     if (key.equalsIgnoreCase("Host")) {
-      Section next = new Section(value);
+      if (value.isEmpty()) {
+        throw new IOException("Host requires at least one pattern");
+      }
+      Section next = new Section(value, enclosingHosts);
       sections.add(next);
       return next;
     }
     if (key.equalsIgnoreCase("Include")) {
       includeFiles(value, includeBase, activeFiles, depth, current);
-      Section next = new Section(current.host);
+      Section next = new Section(current.host, enclosingHosts);
       sections.add(next);
       return next;
     }
@@ -189,15 +196,19 @@ public class OpenSSHConfig implements ConfigRepository {
 
   private void includeFiles(String value, Path includeBase, Set<Path> activeFiles, int depth,
       Section current) throws IOException {
+    List<String> enclosingHosts = new ArrayList<>(current.enclosingHosts);
+    if (!current.host.isEmpty()) {
+      enclosingHosts.add(current.host);
+    }
     for (String pattern : includeArguments(value)) {
       for (Path path : expandInclude(pattern, includeBase)) {
-        includeFile(path, includeBase, activeFiles, depth, current.host);
+        includeFile(path, includeBase, activeFiles, depth, enclosingHosts);
       }
     }
   }
 
   private void includeFile(Path path, Path includeBase, Set<Path> activeFiles, int depth,
-      String host) throws IOException {
+      List<String> enclosingHosts) throws IOException {
     if (depth >= 16) {
       throw new IOException("Too many recursive configuration includes: " + path);
     }
@@ -206,9 +217,9 @@ public class OpenSSHConfig implements ConfigRepository {
       throw new IOException("Recursive configuration include: " + path);
     }
     try (BufferedReader included = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-      Section includedContext = new Section(host);
+      Section includedContext = new Section("", enclosingHosts);
       sections.add(includedContext);
-      parse(included, includeBase, activeFiles, depth + 1, includedContext);
+      parse(included, includeBase, activeFiles, depth + 1, includedContext, enclosingHosts);
     } finally {
       activeFiles.remove(realPath);
     }
@@ -217,7 +228,7 @@ public class OpenSSHConfig implements ConfigRepository {
   private static List<String> includeArguments(String value) throws IOException {
     IncludeArgumentParser parser = new IncludeArgumentParser();
     for (int i = 0; i < value.length(); i++) {
-      if (!parser.accept(value.charAt(i))) {
+      if (!parser.accept(value.charAt(i), i + 1 < value.length() ? value.charAt(i + 1) : 0)) {
         break;
       }
     }
@@ -230,12 +241,16 @@ public class OpenSSHConfig implements ConfigRepository {
     private char quote;
     private boolean escaped;
 
-    boolean accept(char ch) {
+    boolean accept(char ch, char next) {
       if (escaped) {
         path.append(ch);
         escaped = false;
       } else if (ch == '\\') {
-        escaped = true;
+        if (next == '\\' || next == '"' || next == '\'' || (quote == 0 && next == ' ')) {
+          escaped = true;
+        } else {
+          path.append(ch);
+        }
       } else if (quote != 0) {
         if (ch == quote) {
           quote = 0;
@@ -255,7 +270,7 @@ public class OpenSSHConfig implements ConfigRepository {
     }
 
     List<String> finish(String value) throws IOException {
-      if (escaped || quote != 0) {
+      if (quote != 0) {
         throw new IOException("Unterminated Include path: " + value);
       }
       flush();
@@ -340,14 +355,33 @@ public class OpenSSHConfig implements ConfigRepository {
     }
     PathMatcher matcher;
     try {
-      matcher = path.getFileSystem().getPathMatcher("glob:" + path);
+      String glob = path.toString().replace('\\', '/').replace("{", "\\{").replace("}", "\\}");
+      matcher = path.getFileSystem().getPathMatcher("glob:" + glob);
     } catch (IllegalArgumentException e) {
       throw new IOException("Invalid Include pattern: " + pattern, e);
     }
-    try (Stream<Path> candidates = Files.walk(prefix)) {
-      return candidates.filter(matcher::matches).filter(Files::isRegularFile)
+    int depth = path.getNameCount() - prefix.getNameCount();
+    try (Stream<Path> candidates = Files.walk(prefix, depth, FileVisitOption.FOLLOW_LINKS)) {
+      return candidates.filter(candidate -> matchesIncludeGlob(path, prefix, candidate, matcher))
+          .filter(Files::isRegularFile)
           .sorted(Comparator.comparing(Path::toString)).collect(Collectors.toList());
+    } catch (UncheckedIOException e) {
+      throw e.getCause();
     }
+  }
+
+  private static boolean matchesIncludeGlob(Path pattern, Path prefix, Path candidate,
+      PathMatcher matcher) {
+    if (!matcher.matches(candidate)) {
+      return false;
+    }
+    for (int i = prefix.getNameCount(); i < candidate.getNameCount(); i++) {
+      if (candidate.getName(i).toString().startsWith(".")
+          && !pattern.getName(i).toString().startsWith(".")) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private static Path literalPrefix(Path path) {
@@ -418,7 +452,11 @@ public class OpenSSHConfig implements ConfigRepository {
 
       byte[] _host = Util.str2byte(host);
       for (Section section : sections) {
-        if (section.host.isEmpty() || matchesHostPatterns(section.host, _host)) {
+        boolean matches = section.host.isEmpty() || matchesHostPatterns(section.host, _host);
+        for (String enclosingHost : section.enclosingHosts) {
+          matches &= matchesHostPatterns(enclosingHost, _host);
+        }
+        if (matches) {
           _configs.addElement(section.options);
         }
       }

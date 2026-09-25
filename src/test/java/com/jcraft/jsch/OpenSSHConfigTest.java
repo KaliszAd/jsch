@@ -51,7 +51,58 @@ class OpenSSHConfigTest {
     OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString(), sshDir);
     assertEquals("first", config.getConfig("target").getUser());
     assertEquals("after.example", config.getConfig("target").getHostname());
-    assertEquals(2222, config.getConfig("elsewhere").getPort());
+    assertEquals(-1, config.getConfig("elsewhere").getPort());
+  }
+
+  @Test
+  void nestedIncludeCannotEscapeEnclosingHost() throws IOException {
+    Path nested = tempDir.resolve("nested.conf");
+    Path middle = tempDir.resolve("middle.conf");
+    write(nested, "Host other\n Port 2222\nHost target\n User nested\n");
+    write(middle, "Include " + nested + "\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Host target\n Include " + middle + "\n");
+
+    OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString());
+    assertEquals(-1, config.getConfig("other").getPort());
+    assertEquals("nested", config.getConfig("target").getUser());
+  }
+
+  @Test
+  void includeGlobsSkipDotfiles() throws IOException {
+    Path snippets = Files.createDirectory(tempDir.resolve("snippets"));
+    write(snippets.resolve(".hidden.conf"), "User hidden\n");
+    write(snippets.resolve("visible.conf"), "User visible\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Include " + snippets + "/*.conf\n");
+    assertEquals("visible", OpenSSHConfig.parseFile(main.toString()).getConfig("any").getUser());
+  }
+
+  @Test
+  void includeExpandsHomeToken() throws IOException {
+    Path main = tempDir.resolve("config");
+    Path included = tempDir.resolve("included.conf");
+    String originalHome = System.getProperty("user.home");
+    try {
+      System.setProperty("user.home", tempDir.toString());
+      write(included, "Host target\n User from-home\n");
+      write(main, "Include %d/" + included.getFileName() + "\n");
+      assertEquals("from-home", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
+    } finally {
+      System.setProperty("user.home", originalHome);
+    }
+  }
+
+  @Test
+  void includeArgumentPreservesUnrecognizedBackslashEscapes() throws IOException {
+    Path main = tempDir.resolve("config");
+    write(main, "Include " + tempDir + "/missing\\name.conf\nHost target\n User someone\n");
+    assertEquals("someone", OpenSSHConfig.parseFile(main.toString()).getConfig("target").getUser());
+  }
+
+  @Test
+  void emptyHostPatternIsRejected() {
+    assertThrows(IOException.class, () -> OpenSSHConfig.parse("Host =\n User someone\n"));
   }
 
   @Test
