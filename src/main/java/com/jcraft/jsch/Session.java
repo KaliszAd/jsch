@@ -3647,7 +3647,7 @@ public class Session {
       return;
     }
 
-    ConfigRepository.Config config = configRepository.getConfig(org_host);
+    ConfigRepository.Config config = configRepository.getConfig(org_host, username);
 
     String value = null;
 
@@ -3767,7 +3767,7 @@ public class Session {
       return;
     }
 
-    ConfigRepository.Config config = configRepository.getConfig(org_host);
+    ConfigRepository.Config config = configRepository.getConfig(org_host, username);
 
     String value = null;
 
@@ -3792,7 +3792,7 @@ public class Session {
       return;
     }
 
-    ConfigRepository.Config config = configRepository.getConfig(org_host);
+    ConfigRepository.Config config = configRepository.getConfig(org_host, username);
 
     String[] values = config.getValues("LocalForward");
     if (values != null) {

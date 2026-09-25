@@ -28,12 +28,12 @@ package com.jcraft.jsch;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileVisitOption;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
@@ -56,6 +56,7 @@ import java.util.stream.Stream;
  *
  * <ul>
  * <li>Host</li>
+ * <li>Match (all, host, originalhost, user, localuser)</li>
  * <li>User</li>
  * <li>Hostname</li>
  * <li>Port</li>
@@ -95,6 +96,11 @@ public class OpenSSHConfig implements ConfigRepository {
   /**
    * Parses the given string, and returns an instance of ConfigRepository.
    *
+   * Include directives in {@code conf} may read additional files. Only parse trusted config text.
+   * JSch does not impose OpenSSH's file owner/mode checks because embedded applications may use
+   * application-managed files or filesystems without POSIX permissions; callers must enforce
+   * their own trust policy.
+   *
    * @param conf string, which includes OpenSSH's config
    * @return an instanceof OpenSSHConfig
    */
@@ -108,6 +114,8 @@ public class OpenSSHConfig implements ConfigRepository {
 
   /**
    * Parses the given file, and returns an instance of ConfigRepository.
+   * Included files are read without owner/mode checks; callers choose which config files are
+   * trusted, including on platforms without POSIX ownership metadata.
    *
    * @param file OpenSSH's config file
    * @return an instanceof OpenSSHConfig
@@ -135,34 +143,43 @@ public class OpenSSHConfig implements ConfigRepository {
 
   private OpenSSHConfig(BufferedReader br, Path includeBase, Set<Path> activeFiles)
       throws IOException {
-    Section global = new Section("", Collections.emptyList());
+    Section global = new Section("", null, Collections.emptyList(), Collections.emptyList());
     sections.add(global);
-    parse(br, includeBase, activeFiles, 0, global, Collections.emptyList());
+    parse(br, includeBase, activeFiles, 0, global, Collections.emptyList(),
+        Collections.emptyList());
   }
 
   private static final class Section {
     final String host;
+    final MatchExpression match;
     final List<String> enclosingHosts;
+    final List<MatchExpression> enclosingMatches;
     final Vector<String[]> options = new Vector<>();
 
-    Section(String host, List<String> enclosingHosts) {
+    Section(String host, MatchExpression match, List<String> enclosingHosts,
+        List<MatchExpression> enclosingMatches) {
       this.host = host;
+      this.match = match;
       this.enclosingHosts = enclosingHosts;
+      this.enclosingMatches = enclosingMatches;
     }
   }
 
   private final Vector<Section> sections = new Vector<>();
 
   private void parse(BufferedReader br, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current, List<String> enclosingHosts) throws IOException {
+      Section current, List<String> enclosingHosts, List<MatchExpression> enclosingMatches)
+      throws IOException {
     String line;
     while ((line = br.readLine()) != null) {
-      current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts);
+      current = parseLine(line, includeBase, activeFiles, depth, current, enclosingHosts,
+          enclosingMatches);
     }
   }
 
   private Section parseLine(String line, Path includeBase, Set<Path> activeFiles, int depth,
-      Section current, List<String> enclosingHosts) throws IOException {
+      Section current, List<String> enclosingHosts, List<MatchExpression> enclosingMatches)
+      throws IOException {
     line = line.trim();
     if (line.isEmpty() || line.startsWith("#")) {
       return current;
@@ -180,13 +197,18 @@ public class OpenSSHConfig implements ConfigRepository {
       if (value.isEmpty()) {
         throw new IOException("Host requires at least one pattern");
       }
-      Section next = new Section(value, enclosingHosts);
+      Section next = new Section(value, null, enclosingHosts, enclosingMatches);
+      sections.add(next);
+      return next;
+    }
+    if (key.equalsIgnoreCase("Match")) {
+      Section next = new Section("", parseMatch(value), enclosingHosts, enclosingMatches);
       sections.add(next);
       return next;
     }
     if (key.equalsIgnoreCase("Include")) {
       includeFiles(value, includeBase, activeFiles, depth, current);
-      Section next = new Section(current.host, enclosingHosts);
+      Section next = new Section(current.host, current.match, enclosingHosts, enclosingMatches);
       sections.add(next);
       return next;
     }
@@ -197,18 +219,22 @@ public class OpenSSHConfig implements ConfigRepository {
   private void includeFiles(String value, Path includeBase, Set<Path> activeFiles, int depth,
       Section current) throws IOException {
     List<String> enclosingHosts = new ArrayList<>(current.enclosingHosts);
+    List<MatchExpression> enclosingMatches = new ArrayList<>(current.enclosingMatches);
     if (!current.host.isEmpty()) {
       enclosingHosts.add(current.host);
     }
+    if (current.match != null) {
+      enclosingMatches.add(current.match);
+    }
     for (String pattern : includeArguments(value)) {
       for (Path path : expandInclude(pattern, includeBase)) {
-        includeFile(path, includeBase, activeFiles, depth, enclosingHosts);
+        includeFile(path, includeBase, activeFiles, depth, enclosingHosts, enclosingMatches);
       }
     }
   }
 
   private void includeFile(Path path, Path includeBase, Set<Path> activeFiles, int depth,
-      List<String> enclosingHosts) throws IOException {
+      List<String> enclosingHosts, List<MatchExpression> enclosingMatches) throws IOException {
     if (depth >= 16) {
       throw new IOException("Too many recursive configuration includes: " + path);
     }
@@ -217,9 +243,10 @@ public class OpenSSHConfig implements ConfigRepository {
       throw new IOException("Recursive configuration include: " + path);
     }
     try (BufferedReader included = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-      Section includedContext = new Section("", enclosingHosts);
+      Section includedContext = new Section("", null, enclosingHosts, enclosingMatches);
       sections.add(includedContext);
-      parse(included, includeBase, activeFiles, depth + 1, includedContext, enclosingHosts);
+      parse(included, includeBase, activeFiles, depth + 1, includedContext, enclosingHosts,
+          enclosingMatches);
     } finally {
       activeFiles.remove(realPath);
     }
@@ -233,6 +260,95 @@ public class OpenSSHConfig implements ConfigRepository {
       }
     }
     return parser.finish(value);
+  }
+
+  private static MatchExpression parseMatch(String value) throws IOException {
+    List<String> arguments = includeArguments(value);
+    List<MatchCriterion> criteria = new ArrayList<>();
+    for (int i = 0; i < arguments.size(); i++) {
+      String attribute = arguments.get(i);
+      boolean negated = attribute.startsWith("!");
+      if (negated) {
+        attribute = attribute.substring(1);
+      }
+      int equals = attribute.indexOf('=');
+      String pattern = equals < 0 ? null : attribute.substring(equals + 1);
+      String type = (equals < 0 ? attribute : attribute.substring(0, equals))
+          .toLowerCase(Locale.ROOT);
+      if (type.equals("all")) {
+        if (arguments.size() != 1) {
+          throw new IOException("Match all cannot be combined with other criteria");
+        }
+        criteria.add(new MatchCriterion(type, null, negated));
+        continue;
+      }
+      if (!type.equals("host") && !type.equals("originalhost") && !type.equals("user")
+          && !type.equals("localuser")) {
+        throw new IOException("Unsupported Match criterion: " + type);
+      }
+      if (pattern == null && ++i < arguments.size()) {
+        pattern = arguments.get(i);
+      }
+      if (pattern == null || pattern.isEmpty()) {
+        throw new IOException("Missing Match pattern for " + type);
+      }
+      criteria.add(new MatchCriterion(type, pattern, negated));
+    }
+    return new MatchExpression(criteria);
+  }
+
+  private static final class MatchCriterion {
+    final String type;
+    final String pattern;
+    final boolean negated;
+
+    MatchCriterion(String type, String pattern, boolean negated) {
+      this.type = type;
+      this.pattern = pattern;
+      this.negated = negated;
+    }
+
+    boolean matches(String originalHost, String effectiveHost, String remoteUser) {
+      String candidate;
+      switch (type) {
+        case "all":
+          return !negated;
+        case "host":
+          candidate = effectiveHost;
+          break;
+        case "originalhost":
+          candidate = originalHost;
+          break;
+        case "user":
+          candidate = remoteUser;
+          break;
+        case "localuser":
+          candidate = System.getProperty("user.name");
+          break;
+        default:
+          return false;
+      }
+      boolean matched = candidate != null
+          && matchesHostPatterns(pattern, Util.str2byte(candidate));
+      return negated ? !matched : matched;
+    }
+  }
+
+  private static final class MatchExpression {
+    final List<MatchCriterion> criteria;
+
+    MatchExpression(List<MatchCriterion> criteria) {
+      this.criteria = criteria;
+    }
+
+    boolean matches(String originalHost, String effectiveHost, String remoteUser) {
+      for (MatchCriterion criterion : criteria) {
+        if (!criterion.matches(originalHost, effectiveHost, remoteUser)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 
   private static final class IncludeArgumentParser {
@@ -296,63 +412,106 @@ public class OpenSSHConfig implements ConfigRepository {
     if (name.equals("~") || name.startsWith("~/")) {
       name = System.getProperty("user.home") + name.substring(1);
     }
-    Path path = Paths.get(name);
-    if (!path.isAbsolute()) {
-      path = includeBase.resolve(path);
-    }
-    return matchIncludeFiles(path.toAbsolutePath().normalize(), pattern);
-  }
-
-  private static List<Path> matchIncludeFiles(Path path, String pattern) throws IOException {
-    Path prefix = literalPrefix(path);
-    if (prefix.equals(path)) {
-      return Files.exists(path) ? Collections.singletonList(path) : Collections.emptyList();
-    }
-    if (!Files.exists(prefix)) {
-      return Collections.emptyList();
-    }
-    PathMatcher matcher;
     try {
-      String glob = path.toString().replace('\\', '/').replace("{", "\\{").replace("}", "\\}");
-      matcher = path.getFileSystem().getPathMatcher("glob:" + glob);
-    } catch (IllegalArgumentException e) {
-      throw new IOException("Invalid Include pattern: " + pattern, e);
-    }
-    int depth = path.getNameCount() - prefix.getNameCount();
-    try (Stream<Path> candidates = Files.walk(prefix, depth, FileVisitOption.FOLLOW_LINKS)) {
-      return candidates.filter(candidate -> matchesIncludeGlob(path, prefix, candidate, matcher))
-          .filter(Files::isRegularFile)
-          .sorted(Comparator.comparing(Path::toString)).collect(Collectors.toList());
-    } catch (UncheckedIOException e) {
-      throw e.getCause();
+      return matchIncludeFiles(name, includeBase);
+    } catch (InvalidPathException e) {
+      throw new IOException("Invalid Include path: " + pattern, e);
     }
   }
 
-  private static boolean matchesIncludeGlob(Path pattern, Path prefix, Path candidate,
-      PathMatcher matcher) {
-    if (!matcher.matches(candidate)) {
-      return false;
-    }
-    for (int i = prefix.getNameCount(); i < candidate.getNameCount(); i++) {
-      if (candidate.getName(i).toString().startsWith(".")
-          && !pattern.getName(i).toString().startsWith(".")) {
-        return false;
+  private static List<Path> matchIncludeFiles(String pattern, Path includeBase) throws IOException {
+    int wildcard = firstWildcard(pattern);
+    if (wildcard < 0) {
+      Path path = Paths.get(pattern);
+      if (!path.isAbsolute()) {
+        path = includeBase.resolve(path);
       }
+      return Files.isRegularFile(path) ? Collections.singletonList(path) : Collections.emptyList();
     }
-    return true;
-  }
 
-  private static Path literalPrefix(Path path) {
-    Path prefix = path.getRoot();
-    for (Path part : path) {
-      String segment = part.toString();
-      if (segment.indexOf('*') >= 0 || segment.indexOf('?') >= 0 || segment.indexOf('[') >= 0
-          || segment.indexOf('{') >= 0) {
+    int separator = lastSeparatorBefore(pattern, wildcard);
+    Path prefix = separator < 0 ? includeBase : Paths.get(pattern.substring(0, separator + 1));
+    if (!prefix.isAbsolute()) {
+      prefix = includeBase.resolve(prefix);
+    }
+    List<Path> candidates = new ArrayList<>();
+    candidates.add(prefix);
+    for (String segment : splitSegments(pattern.substring(separator + 1))) {
+      List<Path> next = new ArrayList<>();
+      if (firstWildcard(segment) < 0) {
+        for (Path directory : candidates) {
+          Path path = directory.resolve(segment);
+          if (Files.exists(path)) {
+            next.add(path);
+          }
+        }
+      } else {
+        PathMatcher matcher;
+        try {
+          matcher = prefix.getFileSystem().getPathMatcher("glob:"
+              + segment.replace("{", "\\{").replace("}", "\\}"));
+        } catch (IllegalArgumentException e) {
+          throw new IOException("Invalid Include pattern: " + pattern, e);
+        }
+        for (Path directory : candidates) {
+          if (!Files.isDirectory(directory)) {
+            continue;
+          }
+          try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+            for (Path entry : entries) {
+              String filename = entry.getFileName().toString();
+              if ((segment.startsWith(".") || !filename.startsWith("."))
+                  && matcher.matches(entry.getFileName())) {
+                next.add(entry);
+              }
+            }
+          } catch (IOException e) {
+            // An unreadable branch does not prevent other glob matches.
+          }
+        }
+      }
+      candidates = next;
+      if (candidates.isEmpty()) {
         break;
       }
-      prefix = prefix.resolve(part);
     }
-    return prefix;
+    return candidates.stream().filter(Files::isRegularFile)
+        .sorted(Comparator.comparing(Path::toString)).collect(Collectors.toList());
+  }
+
+  private static int firstWildcard(String value) {
+    for (int i = 0; i < value.length(); i++) {
+      char ch = value.charAt(i);
+      if (ch == '*' || ch == '?' || ch == '[') {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static int lastSeparatorBefore(String value, int limit) {
+    for (int i = limit - 1; i >= 0; i--) {
+      char ch = value.charAt(i);
+      if (ch == '/' || (java.io.File.separatorChar == '\\' && ch == '\\')) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static List<String> splitSegments(String pattern) {
+    List<String> segments = new ArrayList<>();
+    int start = 0;
+    for (int i = 0; i <= pattern.length(); i++) {
+      if (i == pattern.length() || pattern.charAt(i) == '/'
+          || (java.io.File.separatorChar == '\\' && pattern.charAt(i) == '\\')) {
+        if (i > start) {
+          segments.add(pattern.substring(start, i));
+        }
+        start = i + 1;
+      }
+    }
+    return segments;
   }
 
   private static boolean matchesHostPatterns(String patternList, byte[] host) {
@@ -372,7 +531,12 @@ public class OpenSSHConfig implements ConfigRepository {
 
   @Override
   public Config getConfig(String host) {
-    return new MyConfig(host);
+    return new MyConfig(host, null);
+  }
+
+  @Override
+  public Config getConfig(String host, String user) {
+    return new MyConfig(host, user);
   }
 
   /**
@@ -405,17 +569,36 @@ public class OpenSSHConfig implements ConfigRepository {
     private String host;
     private Vector<Vector<String[]>> _configs = new Vector<>();
 
-    MyConfig(String host) {
+    MyConfig(String host, String user) {
       this.host = host;
 
       byte[] _host = Util.str2byte(host);
+      String effectiveHost = host;
+      String remoteUser = user != null ? user : System.getProperty("user.name");
+      boolean hostnameSet = false;
+      boolean userSet = user != null;
       for (Section section : sections) {
         boolean matches = section.host.isEmpty() || matchesHostPatterns(section.host, _host);
         for (String enclosingHost : section.enclosingHosts) {
           matches &= matchesHostPatterns(enclosingHost, _host);
         }
+        if (section.match != null) {
+          matches &= section.match.matches(host, effectiveHost, remoteUser);
+        }
+        for (MatchExpression enclosingMatch : section.enclosingMatches) {
+          matches &= enclosingMatch.matches(host, effectiveHost, remoteUser);
+        }
         if (matches) {
           _configs.addElement(section.options);
+          for (String[] option : section.options) {
+            if (!hostnameSet && option[0].equalsIgnoreCase("HostName")) {
+              effectiveHost = option[1].replace("%h", host);
+              hostnameSet = true;
+            } else if (!userSet && option[0].equalsIgnoreCase("User")) {
+              remoteUser = option[1];
+              userSet = true;
+            }
+          }
         }
       }
     }

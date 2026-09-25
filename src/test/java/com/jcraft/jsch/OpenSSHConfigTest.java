@@ -69,6 +69,47 @@ class OpenSSHConfigTest {
   }
 
   @Test
+  void matchConditionsUseEffectiveHostAndRemoteUser() throws IOException {
+    OpenSSHConfig config = OpenSSHConfig.parse("Host alias\n HostName real.example\n"
+        + "Match host real.example user deploy\n Port 2222\n"
+        + "Match originalhost alias localuser " + System.getProperty("user.name")
+        + "\n User matched\nMatch all\n ForwardAgent yes\n");
+
+    assertEquals(2222, config.getConfig("alias", "deploy").getPort());
+    assertEquals(-1, config.getConfig("alias", "other").getPort());
+    assertEquals("matched", config.getConfig("alias").getUser());
+    assertEquals("yes", config.getConfig("elsewhere").getValue("ForwardAgent"));
+  }
+
+  @Test
+  void sessionPassesExplicitUserToMatch() throws Exception {
+    JSch jsch = new JSch();
+    jsch.setConfigRepository(
+        OpenSSHConfig.parse("Match user deploy\n Port 2222\nMatch all\n User configured\n"));
+
+    assertEquals(2222, jsch.getSession("deploy", "example.com").getPort());
+    assertEquals(22, jsch.getSession("other", "example.com").getPort());
+  }
+
+  @Test
+  void includedMatchCannotEscapeEnclosingHost() throws IOException {
+    Path included = tempDir.resolve("child.conf");
+    write(included, "Match all\n Port 2222\n");
+    Path main = tempDir.resolve("config");
+    write(main, "Host alias\n Include " + included + "\n");
+
+    OpenSSHConfig config = OpenSSHConfig.parseFile(main.toString());
+    assertEquals(2222, config.getConfig("alias").getPort());
+    assertEquals(-1, config.getConfig("elsewhere").getPort());
+  }
+
+  @Test
+  void unsupportedMatchConditionFailsClosed() {
+    assertThrows(IOException.class,
+        () -> OpenSSHConfig.parse("Match exec true\n StrictHostKeyChecking no\n"));
+  }
+
+  @Test
   void includeGlobsSkipDotfiles() throws IOException {
     Path snippets = Files.createDirectory(tempDir.resolve("snippets"));
     write(snippets.resolve(".hidden.conf"), "User hidden\n");
