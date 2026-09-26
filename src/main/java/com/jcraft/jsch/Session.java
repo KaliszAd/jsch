@@ -3838,7 +3838,11 @@ public class Session {
       byte[] bytes = Util.str2byte(input.toString());
       sha1.update(bytes, 0, bytes.length);
       StringBuilder hex = new StringBuilder();
-      for (byte b : sha1.digest()) {
+      byte[] digest = sha1.digest();
+      if (digest.length != 20) {
+        throw new JSchException("the configured sha-1 class is not SHA-1");
+      }
+      for (byte b : digest) {
         hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
       }
       return hex.toString();

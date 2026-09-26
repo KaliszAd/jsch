@@ -230,7 +230,8 @@ class SessionIdentityFileTokenTest {
   void connectionHashFailsClosedWhenTheConfiguredHashIsUnavailable() throws Exception {
     String sha1 = JSch.getConfig("sha-1");
     try {
-      for (String hashClass : new String[] {"missing.Sha1", ExplodingHash.class.getName()}) {
+      for (String hashClass : new String[] {"missing.Sha1", ExplodingHash.class.getName(),
+          "com.jcraft.jsch.jce.SHA256"}) {
         JSch.setConfig("sha-1", hashClass);
         JSch jsch = new JSch();
         jsch.setConfigRepository(OpenSSHConfig

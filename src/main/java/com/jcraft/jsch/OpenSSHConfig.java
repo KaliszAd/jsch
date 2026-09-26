@@ -567,7 +567,12 @@ public class OpenSSHConfig implements ConfigRepository {
       if (slash >= 0) {
         String length = entry.substring(slash + 1);
         // Digits only: Integer.parseInt would also accept a sign.
-        bits = length.matches("\\d{1,3}") ? Integer.parseInt(length) : -1;
+        // Digits only, as OpenSSH: a sign is rejected, zero padding and overflow handled below.
+        try {
+          bits = length.matches("\\d+") ? Integer.parseInt(length) : -1;
+        } catch (NumberFormatException e) {
+          bits = -1;
+        }
       }
       if (bits < 0 || bits > bytes.length * 8 || !hostBitsZero(bytes, bits)) {
         throw new IOException("Invalid Match localnetwork address list: " + list);
@@ -577,6 +582,7 @@ public class OpenSSHConfig implements ConfigRepository {
 
     /** Parses an IP literal without ever resolving a host name. */
     private static byte[] parseLiteral(String address) {
+      // Decimal octets 0-255 without leading zeros, as inet_pton reads them; 010 is not accepted.
       String octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
       boolean ipv4 = address.matches(octet + "(\\." + octet + "){3}");
       boolean ipv6 = address.indexOf(':') >= 0 && address.matches("[0-9A-Fa-f:.]+");
