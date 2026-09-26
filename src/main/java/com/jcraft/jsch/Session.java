@@ -149,8 +149,6 @@ public class Session {
   SocketFactory socket_factory = null;
 
   private Hashtable<String, String> config = null;
-  private static final String USER_NAME_PROPERTY = "user.name";
-  private static final String CLEAR_ALL_FORWARDINGS = "ClearAllForwardings";
   private ConfigRepository.Config resolvedConfig;
   private List<Identity> configIdentities;
   private List<Identity> trailingConfigIdentities;
@@ -202,7 +200,7 @@ public class Session {
     applyConfig();
 
     if (this.username == null) {
-      this.username = Util.getSystemProperty(USER_NAME_PROPERTY);
+      this.username = Util.getSystemProperty("user.name");
     }
 
     if (this.username == null) {
@@ -3714,7 +3712,7 @@ public class Session {
     checkConfig(hostConfig, "PubkeyAcceptedAlgorithms");
     checkConfig(hostConfig, "FingerprintHash");
     checkConfig(hostConfig, "MaxAuthTries");
-    checkConfig(hostConfig, CLEAR_ALL_FORWARDINGS);
+    checkConfig(hostConfig, "ClearAllForwardings");
 
     value = hostConfig.getValue("HostKeyAlias");
     if (value != null)
@@ -3770,9 +3768,9 @@ public class Session {
       setConfig("MaxAuthTries", value);
     }
 
-    value = hostConfig.getValue(CLEAR_ALL_FORWARDINGS);
+    value = hostConfig.getValue("ClearAllForwardings");
     if (value != null) {
-      setConfig(CLEAR_ALL_FORWARDINGS, value);
+      setConfig("ClearAllForwardings", value);
     }
   }
 
@@ -3812,9 +3810,9 @@ public class Session {
       case 'p':
         return Integer.toString(port);
       case 'r':
-        return username != null ? username : Util.getSystemProperty(USER_NAME_PROPERTY);
+        return username != null ? username : Util.getSystemProperty("user.name");
       case 'u':
-        return Util.getSystemProperty(USER_NAME_PROPERTY);
+        return Util.getSystemProperty("user.name");
       default:
         return null;
     }
@@ -3876,7 +3874,7 @@ public class Session {
 
   private void requestPortForwarding() throws JSchException {
 
-    if (getConfig(CLEAR_ALL_FORWARDINGS).equals("yes"))
+    if (getConfig("ClearAllForwardings").equals("yes"))
       return;
 
     if (resolvedConfig == null) {

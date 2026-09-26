@@ -210,7 +210,6 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static final int MAX_INCLUDE_DEPTH = 16; // as OpenSSH's READCONF_MAX_DEPTH
-  private static final String INCLUDE = "Include";
 
   private final Vector<Section> sections = new Vector<>();
   // OpenSSH re-reads the config once more when it has a non-negated "Match final".
@@ -258,7 +257,7 @@ public class OpenSSHConfig implements ConfigRepository {
     String[] keyValue = line.split("[= \t]", 2);
     if (keyValue.length < 2) {
       if (line.equalsIgnoreCase("Host") || line.equalsIgnoreCase("Match")
-          || line.equalsIgnoreCase(INCLUDE)) {
+          || line.equalsIgnoreCase("Include")) {
         throw new IOException(line + " requires an argument");
       }
       return current;
@@ -284,10 +283,10 @@ public class OpenSSHConfig implements ConfigRepository {
       sections.add(next);
       return next;
     }
-    if (value.isEmpty() && !key.equalsIgnoreCase(INCLUDE)) {
+    if (value.isEmpty() && !key.equalsIgnoreCase("Include")) {
       return current;
     }
-    if (key.equalsIgnoreCase(INCLUDE)) {
+    if (key.equalsIgnoreCase("Include")) {
       includeFiles(value, frame, current);
       Section next = new Section(current.host, current.match, enclosingHosts, enclosingMatches);
       sections.add(next);
@@ -409,7 +408,7 @@ public class OpenSSHConfig implements ConfigRepository {
     if (pattern == null && next < arguments.size()) {
       pattern = arguments.get(next++);
     }
-    if (pattern == null || (pattern.isEmpty() && !type.equals(MatchCriterion.TAGGED))) {
+    if (pattern == null || (pattern.isEmpty() && !type.equals("tagged"))) {
       throw new IOException("Missing Match pattern for " + type);
     }
     criteria.add(new MatchCriterion(type, pattern, negated));
@@ -429,8 +428,7 @@ public class OpenSSHConfig implements ConfigRepository {
 
   private static boolean onlyPassCriteria(List<MatchCriterion> criteria) {
     for (MatchCriterion criterion : criteria) {
-      if (!criterion.type.equals(MatchCriterion.CANONICAL)
-          && !criterion.type.equals(MatchCriterion.FINAL)) {
+      if (!criterion.type.equals("canonical") && !criterion.type.equals("final")) {
         return false;
       }
     }
@@ -452,14 +450,10 @@ public class OpenSSHConfig implements ConfigRepository {
   }
 
   private static final class MatchCriterion {
-    static final String TAGGED = "tagged";
-    static final String FINAL = "final";
-    static final String CANONICAL = "canonical";
-    static final String LOCALNETWORK = "localnetwork";
     static final Set<String> WITHOUT_ARGUMENT =
-        new HashSet<>(Arrays.asList("all", MatchCriterion.CANONICAL, MatchCriterion.FINAL));
+        new HashSet<>(Arrays.asList("all", "canonical", "final"));
     static final Set<String> WITH_ARGUMENT = new HashSet<>(Arrays.asList("host", "originalhost",
-        "user", "localuser", MatchCriterion.TAGGED, "version", MatchCriterion.LOCALNETWORK));
+        "user", "localuser", "tagged", "version", "localnetwork"));
     static final Set<String> UNSUPPORTED =
         new HashSet<>(Arrays.asList("exec", "command", "sessiontype"));
 
@@ -472,8 +466,8 @@ public class OpenSSHConfig implements ConfigRepository {
       this.type = type;
       this.pattern = pattern;
       this.negated = negated;
-      this.networks = type.equals(MatchCriterion.LOCALNETWORK) ? LocalNetwork.parseList(pattern)
-          : Collections.emptyList();
+      this.networks =
+          type.equals("localnetwork") ? LocalNetwork.parseList(pattern) : Collections.emptyList();
     }
 
     boolean matches(MatchContext context) {
@@ -484,11 +478,11 @@ public class OpenSSHConfig implements ConfigRepository {
       switch (type) {
         case "all":
           return true;
-        case CANONICAL:
-        case FINAL:
+        case "canonical":
+        case "final":
           // JSch does not canonicalize, so both hold exactly in the final pass.
           return context.finalPass;
-        case LOCALNETWORK:
+        case "localnetwork":
           return LocalNetwork.matchesInterface(networks);
         default:
           String candidate = candidate(context);
@@ -511,7 +505,7 @@ public class OpenSSHConfig implements ConfigRepository {
           return context.remoteUser;
         case "localuser":
           return Util.getSystemProperty("user.name");
-        case TAGGED:
+        case "tagged":
           return context.tag == null ? "" : context.tag;
         case "version":
           return "JSCH_" + JSch.VERSION;
@@ -529,7 +523,7 @@ public class OpenSSHConfig implements ConfigRepository {
       this.criteria = criteria;
       boolean finalPass = false;
       for (MatchCriterion criterion : criteria) {
-        finalPass |= criterion.type.equals(MatchCriterion.FINAL) && !criterion.negated;
+        finalPass |= criterion.type.equals("final") && !criterion.negated;
       }
       this.requestsFinalPass = finalPass;
     }
